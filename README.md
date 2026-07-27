@@ -13,8 +13,13 @@ It has two parts:
 
 Chunking is three-tiered, richest source first: **LSP bridge** → **tree-sitter**
 → **fixed-window**. Everything works with just the MCP server; the extension is a
-quality upgrade. See [`local-semantic-search-mcp/implementation-spec.md`](local-semantic-search-mcp/implementation-spec.md)
-for the full design.
+quality upgrade.
+
+📐 **[ARCHITECTURE.md](ARCHITECTURE.md)** — full technical architecture: components,
+data flow, storage schema, the locality/privacy model, token-cost analysis, and
+performance characteristics. See also
+[`local-semantic-search-mcp/implementation-spec.md`](local-semantic-search-mcp/implementation-spec.md)
+for the original design rationale.
 
 ---
 
