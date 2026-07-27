@@ -35,9 +35,29 @@ npm run build
 ### 2. Point VS Code at the server
 
 [`.vscode/mcp.json`](.vscode/mcp.json) is already committed and uses
-`${workspaceFolder}`, so it works as-is when you open this repo in VS Code. To use
-it in **another** repo, copy `.vscode/mcp.json` there and adjust the path in
-`args` to wherever you built `local-semantic-search-mcp`.
+`${workspaceFolder}`, so it works as-is when you open this repo in VS Code.
+
+**To use it in every project (recommended):** register it once at the user level
+instead of per-repo. Command Palette → **MCP: Open User Configuration**, and add:
+
+```json
+{
+  "servers": {
+    "local-semantic-search": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/local-semantic-search-mcp/dist/index.js"],
+      "env": { "WORKSPACE_ROOT": "${workspaceFolder}" }
+    }
+  }
+}
+```
+
+The server path is absolute (it's a one-time install), but `WORKSPACE_ROOT:
+"${workspaceFolder}"` resolves to whatever project you open — so it indexes *that*
+project, not this repo. One built server serves all your projects; you don't clone
+or copy it per-project. (If `node` isn't found — see Troubleshooting — use the
+absolute path to `node` as the `command`.)
 
 Then in VS Code:
 
@@ -152,5 +172,49 @@ that's a separate ~300 MB artifact and saves the download, independent of the in
   is stamped with the model it was built with), so no manual cleanup required.
 - **`dist/`, `node_modules/`, and `.swe-search/` are gitignored** — clone, then
   `npm install && npm run build` in each project.
+
+## Troubleshooting
+
+**`env: node: No such file or directory` during `npm install`**
+Node isn't on `PATH`. Install Node **22.5+** (needed for the built-in `node:sqlite`;
+24 is ideal). If it's installed as `nodejs` (Debian/Ubuntu), symlink it:
+`sudo ln -s "$(which nodejs)" /usr/local/bin/node`. Don't run `npm install` under
+`sudo` (it drops nvm from `PATH`).
+
+**MCP server won't start: `spawn node ENOENT`**
+VS Code launched from the GUI doesn't inherit your shell `PATH` (common with nvm),
+so it can't find `node`. Fix by putting the **absolute** node path in `mcp.json`:
+`"command": "/home/you/.nvm/versions/node/vXX/bin/node"` (find it with
+`which node`). Or symlink node onto the system PATH:
+`sudo ln -sf "$(which node)" /usr/local/bin/node` and keep `"command": "node"`.
+
+**It indexed the wrong folder / far too few files**
+`WORKSPACE_ROOT` is probably hardcoded. It must be `"${workspaceFolder}"` so it
+follows the open project. Quick check: the `.swe-search/` folder is created at
+whatever `WORKSPACE_ROOT` points to — if it appeared somewhere unexpected, that's
+what got indexed. Fix the value and **Restart** the server.
+
+**I can't find the server's log / Output channel**
+Command Palette → **MCP: List Servers** → select `local-semantic-search` →
+**Show Output**. (The channel only exists once the server has started.) The state
+shown there — Running / Error / Stopped — also tells you if it failed to spawn.
+
+**First start looks frozen at `loading embedding model...`**
+On a fresh machine it's downloading the model (~300 MB) — watch the output for
+`downloading … %`. It needs internet **once**, then runs offline. Don't close VS
+Code *during the download* (a truncated cache fails to load; if that happens,
+`rm -rf local-semantic-search-mcp/node_modules/@huggingface/transformers/.cache`
+and restart). Closing *during indexing* (after download) is safe and resumable.
+
+**A search errors out / times out right after starting**
+The index builds in the background; a query made before it's ready waits, and a
+long build can exceed the client's ~60s timeout. Wait for `index ready: …` in the
+output, then query. (Restarts after the first build are near-instant.)
+
+**Indexing a huge repo is taking hours**
+Trim it — exclude tests/vendored/generated dirs (see *Excluding files & folders*),
+and/or switch to a smaller model like `Xenova/all-MiniLM-L6-v2` in
+`.swe-search.config.json` (~10–20× faster). The build is resumable, so you can also
+just let it run and reopen later — it continues where it stopped.
 
 Licensed MIT — see [LICENSE](LICENSE).
