@@ -1,0 +1,29 @@
+{
+  "name": "swe-search-lsp-bridge",
+  "displayName": "Local Semantic Search — LSP Bridge",
+  "description": "Exposes VS Code's language-server symbol data to the local semantic search MCP server over a local-only named pipe. No network access, no chat UI, no runtime dependencies beyond VS Code itself.",
+  "version": "0.1.0",
+  "publisher": "internal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chintanvyas89/Foundry.git",
+    "directory": "lsp-bridge-extension"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}

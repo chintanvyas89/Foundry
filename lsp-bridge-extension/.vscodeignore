@@ -1,0 +1,11 @@
+# Keep the .vsix lean: ship only the compiled extension + manifest + README.
+.vscode/**
+src/**
+scripts/**
+node_modules/**
+**/*.ts
+**/*.map
+tsconfig.json
+.gitignore
+.vscodeignore
+*.vsix

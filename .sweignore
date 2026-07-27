@@ -1,0 +1,2 @@
+# Compiled output — duplicates the src/ TypeScript, no need to index twice.
+dist/

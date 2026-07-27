@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "local-semantic-search": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/local-semantic-search-mcp/dist/index.js"
+      ],
+      "env": {
+        "WORKSPACE_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+# Dependencies (incl. the ~1GB embedding-model cache under node_modules)
+node_modules/
+
+# Compiled output — rebuild with `npm run build`
+dist/
+
+# Per-workspace index the MCP server writes at runtime
+.swe-search/
+
+# Logs / OS cruft
+*.log
+.DS_Store
