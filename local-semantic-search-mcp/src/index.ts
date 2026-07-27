@@ -43,7 +43,7 @@ async function main() {
       );
     }
 
-    const indexer = new Indexer(workspaceRoot, store);
+    const indexer = new Indexer(workspaceRoot, store, config.exclude);
     console.error('[swe-search] building initial index...');
     const startAt = Date.now();
     let lastLog = 0;
@@ -68,7 +68,7 @@ async function main() {
         `(${embedded} embedded this run, ${skippedFiles} files unchanged & skipped, ${prunedFiles} stale files pruned)`,
     );
 
-    startWatcher(workspaceRoot, indexer);
+    startWatcher(workspaceRoot, indexer, config.exclude);
     console.error('[swe-search] incremental watch active');
   })();
   ready.catch((err) => console.error('[swe-search] background init failed:', err));

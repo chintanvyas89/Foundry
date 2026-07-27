@@ -93,6 +93,28 @@ npx @vscode/vsce package
 
 ---
 
+## Excluding files & folders from the index
+
+Anything excluded is never embedded — the fastest way to speed up a big repo and
+keep results relevant. Three layers, all using gitignore syntax:
+
+1. **Built-in defaults** (always on): `.git`, `node_modules`, `.swe-search`,
+   lockfiles, `*.min.js`, `*.min.css`, `*.map`.
+2. **The project's `.gitignore`** is respected automatically.
+3. **Your own excludes**, via either:
+   - a **`.sweignore`** file at the workspace root, or
+   - an **`exclude`** array in `.swe-search.config.json`:
+     ```json
+     {
+       "exclude": ["tests/", "vendor/", "docs/", "**/*.generated.ts"]
+     }
+     ```
+
+Both accept the same gitignore-style patterns (`folder/`, `*.ext`, `**/glob`).
+Use whichever you prefer — `exclude` keeps everything in one config file;
+`.sweignore` is handy if you'd rather keep the ignore list separate. Excludes
+apply to both the initial build and the live watcher.
+
 ## Sharing the index between developers
 
 The index (`.swe-search/index.db`) is **portable** — paths are stored relative to

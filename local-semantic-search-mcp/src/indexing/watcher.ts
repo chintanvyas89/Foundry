@@ -81,8 +81,12 @@ class IndexQueue {
 
 // Runs continuously after the initial full build (§5.3): re-indexes only the
 // files that change, no periodic full rescans.
-export function startWatcher(workspaceRoot: string, indexer: Indexer): FSWatcher {
-  const ig = buildIgnoreMatcher(workspaceRoot);
+export function startWatcher(
+  workspaceRoot: string,
+  indexer: Indexer,
+  excludePatterns: string[] = [],
+): FSWatcher {
+  const ig = buildIgnoreMatcher(workspaceRoot, excludePatterns);
   const queue = new IndexQueue(indexer);
 
   const watcher = chokidar.watch(workspaceRoot, {

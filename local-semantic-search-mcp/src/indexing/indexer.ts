@@ -33,6 +33,7 @@ export class Indexer {
   constructor(
     private workspaceRoot: string,
     private store: VectorStore,
+    private excludePatterns: string[] = [],
   ) {}
 
   // Workspace-relative, forward-slash path — the key everything is stored under,
@@ -45,7 +46,7 @@ export class Indexer {
   // immediately) and after each file. The caller decides how often to actually
   // log — reporting every file keeps the indexer decoupled from output policy.
   async buildFull(onProgress?: (p: BuildProgress) => void): Promise<BuildStats> {
-    const ig = buildIgnoreMatcher(this.workspaceRoot);
+    const ig = buildIgnoreMatcher(this.workspaceRoot, this.excludePatterns);
     const files = this.walk(this.workspaceRoot, ig);
     const total = files.length;
     const stats: BuildStats = {

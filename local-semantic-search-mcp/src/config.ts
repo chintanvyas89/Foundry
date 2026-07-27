@@ -7,6 +7,10 @@ const configSchema = z.object({
   dtype: z.string().default('q8'),
   topKDefault: z.number().int().positive().default(8),
   maxChunkTokens: z.number().int().positive().default(512),
+  // Extra ignore patterns (gitignore syntax) applied on top of .gitignore,
+  // .sweignore, and the built-in defaults. A convenient place to exclude
+  // folders without a separate .sweignore file, e.g. ["tests/", "vendor/"].
+  exclude: z.array(z.string()).default([]),
 });
 
 export type Config = z.infer<typeof configSchema>;

@@ -34,13 +34,18 @@ const DEFAULT_PATTERNS = [
   '*.map',
 ];
 
-export function buildIgnoreMatcher(workspaceRoot: string): Ignore {
+// extraPatterns are gitignore-syntax patterns from config (`exclude`), applied
+// on top of the built-in defaults and the ignore files.
+export function buildIgnoreMatcher(workspaceRoot: string, extraPatterns: string[] = []): Ignore {
   const ig = ignoreFactory().add(DEFAULT_PATTERNS);
   for (const filename of IGNORE_FILES) {
     const path = join(workspaceRoot, filename);
     if (existsSync(path)) {
       ig.add(readFileSync(path, 'utf-8'));
     }
+  }
+  if (extraPatterns.length > 0) {
+    ig.add(extraPatterns);
   }
   return ig;
 }
