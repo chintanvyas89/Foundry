@@ -1,5 +1,5 @@
 import { readdirSync, statSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { buildIgnoreMatcher, isIgnored, type Ignore } from '../ignore/ignoreMatcher.js';
 import { chunkFile } from '../chunking/chunker.js';
@@ -18,6 +18,7 @@ export interface BuildStats {
   chunks: number;
   embedded: number; // chunks embedded this run
   skippedFiles: number; // files unchanged since last run
+  prunedFiles: number; // stale files removed (deleted / newly ignored)
 }
 
 export interface BuildProgress {
@@ -34,6 +35,12 @@ export class Indexer {
     private store: VectorStore,
   ) {}
 
+  // Workspace-relative, forward-slash path — the key everything is stored under,
+  // so the index is portable across machines/checkouts (see store.ts).
+  private toRel(absPath: string): string {
+    return relative(this.workspaceRoot, absPath).split(sep).join('/');
+  }
+
   // onProgress is called once before the loop (done=0, so the total is known
   // immediately) and after each file. The caller decides how often to actually
   // log — reporting every file keeps the indexer decoupled from output policy.
@@ -41,9 +48,17 @@ export class Indexer {
     const ig = buildIgnoreMatcher(this.workspaceRoot);
     const files = this.walk(this.workspaceRoot, ig);
     const total = files.length;
-    const stats: BuildStats = { files: total, chunks: 0, embedded: 0, skippedFiles: 0 };
+    const stats: BuildStats = {
+      files: total,
+      chunks: 0,
+      embedded: 0,
+      skippedFiles: 0,
+      prunedFiles: 0,
+    };
+    const seen = new Set<string>();
     onProgress?.({ done: 0, total, chunks: 0, embedded: 0, skippedFiles: 0 });
     for (let i = 0; i < total; i++) {
+      seen.add(this.toRel(files[i]));
       const r = await this.indexFile(files[i]);
       stats.chunks += r.total;
       stats.embedded += r.embedded;
@@ -56,6 +71,10 @@ export class Indexer {
         skippedFiles: stats.skippedFiles,
       });
     }
+    // Remove index entries for files that no longer exist / are now ignored.
+    // Runs at the end of a full walk, when `seen` is the authoritative set of
+    // files currently in the workspace.
+    stats.prunedFiles = this.store.pruneMissing(seen);
     return stats;
   }
 
@@ -74,29 +93,31 @@ export class Indexer {
       return { total: 0, embedded: 0, skipped: false }; // unreadable (e.g. removed mid-walk)
     }
     const fileHash = createHash('sha1').update(content).digest('hex');
+    const relPath = this.toRel(absPath);
 
-    if (this.store.getFileHash(absPath) === fileHash) {
-      return { total: this.store.countByFile(absPath), embedded: 0, skipped: true };
+    if (this.store.getFileHash(relPath) === fileHash) {
+      return { total: this.store.countByFile(relPath), embedded: 0, skipped: true };
     }
 
     const chunks = await chunkFile(absPath, this.workspaceRoot);
     if (chunks.length === 0) {
-      this.store.deleteByFile(absPath);
-      this.store.setFileHash(absPath, fileHash);
+      this.store.deleteByFile(relPath);
+      this.store.setFileHash(relPath, fileHash);
       return { total: 0, embedded: 0, skipped: false };
     }
 
     // Reuse embeddings for chunks whose text is unchanged; collect the rest to
-    // embed in one batched call.
-    const existing = this.store.getEmbeddingsByFile(absPath);
+    // embed in one batched call. Paths are relativized here, at the storage
+    // boundary — chunkers still work in absolute paths to read files.
+    const existing = this.store.getEmbeddingsByFile(relPath);
     const indexed: IndexedChunk[] = new Array(chunks.length);
     const toEmbed: number[] = [];
     for (let i = 0; i < chunks.length; i++) {
       const c = chunks[i];
-      const id = `${c.file}:${c.startLine}:${c.endLine}`;
+      const id = `${relPath}:${c.startLine}:${c.endLine}`;
       const reused = existing.get(c.contentHash);
       if (reused) {
-        indexed[i] = { ...c, id, embedding: reused };
+        indexed[i] = { ...c, file: relPath, id, embedding: reused };
       } else {
         toEmbed.push(i);
       }
@@ -107,19 +128,25 @@ export class Indexer {
       for (let j = 0; j < toEmbed.length; j++) {
         const i = toEmbed[j];
         const c = chunks[i];
-        indexed[i] = { ...c, id: `${c.file}:${c.startLine}:${c.endLine}`, embedding: embeddings[j] };
+        indexed[i] = {
+          ...c,
+          file: relPath,
+          id: `${relPath}:${c.startLine}:${c.endLine}`,
+          embedding: embeddings[j],
+        };
       }
     }
 
-    this.store.deleteByFile(absPath);
+    this.store.deleteByFile(relPath);
     this.store.upsertChunks(indexed);
-    this.store.setFileHash(absPath, fileHash);
+    this.store.setFileHash(relPath, fileHash);
     return { total: indexed.length, embedded: toEmbed.length, skipped: false };
   }
 
   removeFile(absPath: string): void {
-    this.store.deleteByFile(absPath);
-    this.store.deleteFileHash(absPath);
+    const relPath = this.toRel(absPath);
+    this.store.deleteByFile(relPath);
+    this.store.deleteFileHash(relPath);
   }
 
   private walk(dir: string, ig: Ignore): string[] {

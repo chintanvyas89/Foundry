@@ -93,6 +93,31 @@ npx @vscode/vsce package
 
 ---
 
+## Sharing the index between developers
+
+The index (`.swe-search/index.db`) is **portable** — paths are stored relative to
+the workspace root, and the DB is stamped with the model it was built with. So one
+person can build it once and share it, and others skip re-indexing:
+
+1. Build the index on a canonical checkout (e.g. `main`).
+2. Share `<workspace>/.swe-search/index.db` — via a release artifact, shared drive,
+   or git-LFS. **Don't** commit it to git normally (it's binary and can be hundreds
+   of MB — roughly 3 KB per chunk).
+3. Each dev drops it into their own `<workspace>/.swe-search/index.db` and starts
+   the server. It reconciles against their working tree automatically:
+   - identical files → **skipped** (no embedding),
+   - files they added / changed → **embedded** (just those),
+   - files they deleted / that differ from the shared checkout → **pruned**.
+
+So a dev on a feature branch with a handful of extra files only pays to embed those
+few — everything shared is reused instantly. Requirements: same `model`/`dtype`
+(a mismatch triggers a clean rebuild automatically) and, for maximum reuse, a
+similar code state.
+
+To share the one-time **model download** as well (useful for offline machines),
+copy `local-semantic-search-mcp/node_modules/@huggingface/transformers/.cache` too —
+that's a separate ~300 MB artifact and saves the download, independent of the index.
+
 ## Notes & constraints
 
 - **One indexer per workspace at a time.** Both a running MCP Inspector and a VS
@@ -101,7 +126,8 @@ npx @vscode/vsce package
 - **First index of a large repo is slow** — the embedding model is accurate but
   CPU-bound. It's one-time; restarts reuse the stored index and only re-embed
   changed chunks. Tune `dtype`/`model` in a `.swe-search.config.json` at the
-  workspace root if needed.
+  workspace root if needed — changing the model auto-rebuilds the index (the DB
+  is stamped with the model it was built with), so no manual cleanup required.
 - **`dist/`, `node_modules/`, and `.swe-search/` are gitignored** — clone, then
   `npm install && npm run build` in each project.
 

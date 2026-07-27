@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { embed } from '../embedding/embedder.js';
@@ -8,6 +9,7 @@ export function registerSemanticSearchTool(
   server: McpServer,
   store: VectorStore,
   config: Config,
+  workspaceRoot: string,
   ready: Promise<void>,
 ): void {
   server.tool(
@@ -32,7 +34,10 @@ export function registerSemanticSearchTool(
 
       const text = results
         .map((r, i) => {
-          const location = `${r.file}:${r.startLine}-${r.endLine}`;
+          // Stored paths are workspace-relative for portability; resolve to an
+          // absolute path against THIS machine's workspace root for display.
+          const absFile = join(workspaceRoot, r.file);
+          const location = `${absFile}:${r.startLine}-${r.endLine}`;
           const label = r.symbol ? `${r.symbol} (${location})` : location;
           return `${i + 1}. ${label} — score ${r.score.toFixed(3)}\n\`\`\`\n${r.text}\n\`\`\``;
         })

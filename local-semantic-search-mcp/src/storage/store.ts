@@ -20,7 +20,19 @@ CREATE TABLE IF NOT EXISTS files (
   path TEXT PRIMARY KEY,
   fileHash TEXT NOT NULL
 );
+-- Small key/value table. Stamps the embedding model + dtype the vectors were
+-- built with, so a mismatched (or path-incompatible legacy) index is rebuilt
+-- rather than silently searched with the wrong model.
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
+
+// Paths in `chunks.file` / `chunks.id` / `files.path` are stored RELATIVE to
+// the workspace root (forward-slash separated). That keeps the index portable
+// between machines/checkouts, so it can be shared without every dev re-indexing.
+// The indexer relativizes on write; search resolves back to absolute for display.
 
 // Brute-force cosine similarity over Float32Array BLOBs, per §3 — this
 // server targets tens of thousands of chunks per repo, not millions;
@@ -73,6 +85,51 @@ export class VectorStore {
 
   deleteFileHash(file: string): void {
     this.db.prepare('DELETE FROM files WHERE path = ?').run(file);
+  }
+
+  private getMeta(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  private setMeta(key: string, value: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(key, value);
+  }
+
+  // Ensure the stored index was built with this model+dtype. If it wasn't
+  // (model changed, or a legacy pre-stamp index with incompatible absolute
+  // paths), wipe the vectors so buildFull rebuilds cleanly. Returns whether a
+  // wipe happened, so the caller can log it.
+  ensureModelStamp(model: string, dtype: string): { rebuilt: boolean } {
+    if (this.getMeta('model') === model && this.getMeta('dtype') === dtype) {
+      return { rebuilt: false };
+    }
+    const hadData =
+      (this.db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c > 0;
+    if (hadData) {
+      this.db.exec('DELETE FROM chunks; DELETE FROM files;');
+    }
+    this.setMeta('model', model);
+    this.setMeta('dtype', dtype);
+    return { rebuilt: hadData };
+  }
+
+  // Drop index entries for files that are no longer present in the workspace
+  // (deleted, or newly excluded by an ignore rule). `keep` is the set of
+  // relative paths seen in the current walk. Returns how many files were pruned.
+  pruneMissing(keep: Set<string>): number {
+    const rows = this.db.prepare('SELECT path FROM files').all() as Array<{ path: string }>;
+    let pruned = 0;
+    for (const { path } of rows) {
+      if (!keep.has(path)) {
+        this.deleteByFile(path);
+        this.deleteFileHash(path);
+        pruned++;
+      }
+    }
+    return pruned;
   }
 
   upsertChunks(chunks: IndexedChunk[]): void {

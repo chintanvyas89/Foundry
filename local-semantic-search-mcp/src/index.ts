@@ -33,11 +33,21 @@ async function main() {
     console.error('[swe-search] loading embedding model...');
     await initEmbedder(config);
 
+    // Reject a stored index built with a different model/dtype (or a legacy
+    // absolute-path index from before this version) — its vectors/paths aren't
+    // compatible, so wipe and rebuild.
+    const { rebuilt } = store.ensureModelStamp(config.model, config.dtype);
+    if (rebuilt) {
+      console.error(
+        `[swe-search] existing index was built with a different model — rebuilding for ${config.model} (${config.dtype})`,
+      );
+    }
+
     const indexer = new Indexer(workspaceRoot, store);
     console.error('[swe-search] building initial index...');
     const startAt = Date.now();
     let lastLog = 0;
-    const { files, chunks, embedded, skippedFiles } = await indexer.buildFull((p) => {
+    const { files, chunks, embedded, skippedFiles, prunedFiles } = await indexer.buildFull((p) => {
       const now = Date.now();
       const isLast = p.done === p.total;
       // Throttle to ~1 line/sec so a large repo doesn't flood the Output tab,
@@ -55,7 +65,7 @@ async function main() {
     });
     console.error(
       `[swe-search] index ready: ${chunks} chunks across ${files} files ` +
-        `(${embedded} embedded this run, ${skippedFiles} files unchanged & skipped)`,
+        `(${embedded} embedded this run, ${skippedFiles} files unchanged & skipped, ${prunedFiles} stale files pruned)`,
     );
 
     startWatcher(workspaceRoot, indexer);
@@ -63,7 +73,7 @@ async function main() {
   })();
   ready.catch((err) => console.error('[swe-search] background init failed:', err));
 
-  registerSemanticSearchTool(server, store, config, ready);
+  registerSemanticSearchTool(server, store, config, workspaceRoot, ready);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
