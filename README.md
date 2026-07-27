@@ -211,6 +211,19 @@ The index builds in the background; a query made before it's ready waits, and a
 long build can exceed the client's ~60s timeout. Wait for `index ready: …` in the
 output, then query. (Restarts after the first build are near-instant.)
 
+**Copilot reads files instead of calling `semantic_search`**
+The tool is available but the model *chooses* not to use it — Copilot leans on its
+own built-in file-reading/`#codebase` behavior by default (and may say "semantic
+workspace search is not currently available", which refers to *its* built-in
+feature, not this tool). Three ways to steer it:
+- **Force it:** type `#semantic_search <query>` in the chat, or say "use the
+  semantic_search tool to …".
+- **Nudge it per-project:** add a [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
+  (see this repo's copy as a template) telling the agent to prefer `semantic_search`
+  for locating code. VS Code reads it automatically.
+- Autonomous selection is ultimately the model's call — these make it far more
+  likely, but `#semantic_search` is the only guaranteed trigger.
+
 **Indexing a huge repo is taking hours**
 Trim it — exclude tests/vendored/generated dirs (see *Excluding files & folders*),
 and/or switch to a smaller model like `Xenova/all-MiniLM-L6-v2` in

@@ -14,11 +14,19 @@ export function registerSemanticSearchTool(
 ): void {
   server.tool(
     'semantic_search',
-    'Search this workspace for code semantically related to a natural-language or code query. ' +
-      'Returns the top matching chunks with file path, line range, and similarity score.',
+    'Find code in the current workspace by meaning/intent. USE THIS FIRST — before ' +
+      'reading files or grepping — to answer "where is X implemented?", "what code ' +
+      'handles Y?", or "find code similar to Z" across this codebase. It ranks the ' +
+      'most relevant functions/classes by semantic similarity to a natural-language ' +
+      'or code query (not keyword match) and returns each with its file path, line ' +
+      'range, and the code itself, so you can jump straight to the right place ' +
+      'instead of scanning files one by one. Prefer this over file-reading for ' +
+      'locating or exploring unfamiliar code.',
     {
-      query: z.string().describe('Natural-language or code description of what to find'),
-      topK: z.number().int().positive().optional().describe('Number of results to return'),
+      query: z
+        .string()
+        .describe('What to find, in natural language or code, e.g. "where JWT tokens are validated"'),
+      topK: z.number().int().positive().optional().describe('How many results to return (default 8)'),
     },
     async ({ query, topK }) => {
       // Block until the background model load + initial index have finished.
