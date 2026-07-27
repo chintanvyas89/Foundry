@@ -35,7 +35,24 @@ async function main() {
 
     const indexer = new Indexer(workspaceRoot, store);
     console.error('[swe-search] building initial index...');
-    const { files, chunks, embedded, skippedFiles } = await indexer.buildFull();
+    const startAt = Date.now();
+    let lastLog = 0;
+    const { files, chunks, embedded, skippedFiles } = await indexer.buildFull((p) => {
+      const now = Date.now();
+      const isLast = p.done === p.total;
+      // Throttle to ~1 line/sec so a large repo doesn't flood the Output tab,
+      // but always emit the very first and very last updates.
+      if (p.done === 0 || isLast || now - lastLog >= 1000) {
+        lastLog = now;
+        const pct = p.total ? Math.round((p.done / p.total) * 100) : 100;
+        const pending = p.total - p.done;
+        const elapsed = Math.round((now - startAt) / 1000);
+        console.error(
+          `[swe-search] indexing ${pct}% — ${p.done}/${p.total} files, ${pending} pending, ` +
+            `${p.chunks} chunks (${p.embedded} embedded, ${p.skippedFiles} unchanged) — ${elapsed}s`,
+        );
+      }
+    });
     console.error(
       `[swe-search] index ready: ${chunks} chunks across ${files} files ` +
         `(${embedded} embedded this run, ${skippedFiles} files unchanged & skipped)`,

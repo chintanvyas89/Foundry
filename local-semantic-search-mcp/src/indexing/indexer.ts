@@ -20,21 +20,41 @@ export interface BuildStats {
   skippedFiles: number; // files unchanged since last run
 }
 
+export interface BuildProgress {
+  done: number; // files processed so far
+  total: number; // total files to process
+  chunks: number; // chunks in the index so far
+  embedded: number; // chunks embedded so far this run
+  skippedFiles: number; // files skipped as unchanged so far
+}
+
 export class Indexer {
   constructor(
     private workspaceRoot: string,
     private store: VectorStore,
   ) {}
 
-  async buildFull(): Promise<BuildStats> {
+  // onProgress is called once before the loop (done=0, so the total is known
+  // immediately) and after each file. The caller decides how often to actually
+  // log — reporting every file keeps the indexer decoupled from output policy.
+  async buildFull(onProgress?: (p: BuildProgress) => void): Promise<BuildStats> {
     const ig = buildIgnoreMatcher(this.workspaceRoot);
     const files = this.walk(this.workspaceRoot, ig);
-    const stats: BuildStats = { files: files.length, chunks: 0, embedded: 0, skippedFiles: 0 };
-    for (const file of files) {
-      const r = await this.indexFile(file);
+    const total = files.length;
+    const stats: BuildStats = { files: total, chunks: 0, embedded: 0, skippedFiles: 0 };
+    onProgress?.({ done: 0, total, chunks: 0, embedded: 0, skippedFiles: 0 });
+    for (let i = 0; i < total; i++) {
+      const r = await this.indexFile(files[i]);
       stats.chunks += r.total;
       stats.embedded += r.embedded;
       if (r.skipped) stats.skippedFiles++;
+      onProgress?.({
+        done: i + 1,
+        total,
+        chunks: stats.chunks,
+        embedded: stats.embedded,
+        skippedFiles: stats.skippedFiles,
+      });
     }
     return stats;
   }
