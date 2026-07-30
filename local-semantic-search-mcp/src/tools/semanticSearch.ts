@@ -22,6 +22,12 @@ export function registerSemanticSearchTool(
   workspaceRoot: string,
   ready: Promise<void>,
 ): void {
+  // Ordered chunk ids of the most recent search's results, kept in memory so a
+  // follow-up call can pin results by their NUMBER (1-based, as printed) via
+  // `pinResults` — no need to surface raw chunk ids in the text output. This is
+  // per server process, which maps naturally to one client/conversation.
+  let lastResultIds: string[] = [];
+
   server.tool(
     'semantic_search',
     'Find code in the current workspace by meaning/intent. USE THIS FIRST — before ' +
@@ -31,18 +37,23 @@ export function registerSemanticSearchTool(
       'or code query (not keyword match) and returns each with its file path, line ' +
       'range, and the code itself, so you can jump straight to the right place ' +
       'instead of scanning files one by one. Prefer this over file-reading for ' +
-      'locating or exploring unfamiliar code.',
+      'locating or exploring unfamiliar code. ' +
+      'TO DRILL DOWN, call it again: set mode="refine" to narrow to high-confidence ' +
+      'hits or mode="expand" to broaden; add a note to sharpen intent; and/or pass ' +
+      'pinResults with the NUMBERS of the previous results you found on-target (e.g. ' +
+      'pinResults=[1,3]) to steer the next search toward them.',
     {
       query: z
         .string()
         .describe('What to find, in natural language or code, e.g. "where JWT tokens are validated"'),
       topK: z.number().int().positive().optional().describe('How many results to return (default 8)'),
-      pins: z
-        .array(z.string())
+      pinResults: z
+        .array(z.number().int().positive())
         .optional()
         .describe(
-          'Relevance feedback: chunk ids (the "id" field from prior results) to steer the ' +
-            'search toward. Their stored vectors are blended into the query — no re-embedding.',
+          'Relevance feedback by result number: 1-based positions from your PREVIOUS ' +
+            'semantic_search call to steer this search toward (e.g. [1, 3]). No need to ' +
+            'track chunk ids — the server remembers the last results.',
         ),
       note: z
         .string()
@@ -52,8 +63,15 @@ export function registerSemanticSearchTool(
         .enum(['find', 'refine', 'expand'])
         .optional()
         .describe('find (default), refine (narrow to high-confidence hits), or expand (broaden).'),
+      pins: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Relevance feedback by chunk id (the "id" from structured results) — used by ' +
+            'non-LLM UI clients. Prefer pinResults if you are working from the text output.',
+        ),
     },
-    async ({ query, topK, pins, note, mode }) => {
+    async ({ query, topK, pins, pinResults, note, mode }) => {
       // Block until the background model load + initial index have finished.
       // A query that arrives during startup waits here rather than running
       // against a not-yet-loaded embedder or an empty store.
@@ -71,8 +89,18 @@ export function registerSemanticSearchTool(
       if (note && note.trim()) {
         components.push({ vec: await embed(note), weight: 1.0 });
       }
-      if (pins && pins.length > 0) {
-        const pinVecs = store.getEmbeddingsByIds(pins);
+      // Pins can arrive as explicit chunk ids (UI clients) and/or as result
+      // numbers from the previous search (LLM callers). Resolve the numbers
+      // against the remembered last results, then blend all pinned vectors.
+      const pinIds = [...(pins ?? [])];
+      if (pinResults && pinResults.length > 0) {
+        for (const n of pinResults) {
+          const id = lastResultIds[n - 1];
+          if (id) pinIds.push(id);
+        }
+      }
+      if (pinIds.length > 0) {
+        const pinVecs = store.getEmbeddingsByIds(pinIds);
         for (const vec of pinVecs) {
           components.push({ vec, weight: tuning.pinWeight / pinVecs.length });
         }
@@ -84,6 +112,9 @@ export function registerSemanticSearchTool(
       if (tuning.minScore > 0) {
         results = results.filter((r) => r.score >= tuning.minScore);
       }
+
+      // Remember this result set so a follow-up call can pin by result number.
+      lastResultIds = results.map((r) => r.id);
 
       if (results.length === 0) {
         return {
