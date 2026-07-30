@@ -80,10 +80,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.3.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.3.0.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.3.1.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.3.1.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.3.0.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.3.1.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -98,7 +98,7 @@ absolute node path if VS Code can't find `node`). Then:
   through ranked results with live preview, Enter to jump to the exact lines.
 - **Semantic Search: Find similar code** — select code, right-click → *Find
   similar code*.
-- **Search panel** (magnifier icon in the activity bar) — a drilldown view for
+- **Search panel** (target icon in the activity bar) — a drilldown view for
   iterative search: **pin** any result to steer the next query, add a **note**,
   then **Refine** (narrow to high-confidence hits) or **Expand** (broaden). Pins
   reuse the result's stored vector, so refining costs no extra embedding — it's
