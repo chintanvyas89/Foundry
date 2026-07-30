@@ -15,13 +15,23 @@ const configSchema = z.object({
 
 export type Config = z.infer<typeof configSchema>;
 
+// Reported alongside the parsed config so the caller can log which file (if
+// any) actually contributed — misplaced configs (e.g. dropped inside
+// .swe-search/ instead of the workspace root) otherwise fail silently, and
+// the user never sees their exclude patterns take effect.
+export interface LoadedConfig {
+  config: Config;
+  source: string | null; // absolute path if a file was read, null if using defaults
+  expectedPath: string; // where a config file would be picked up from
+}
+
 const CONFIG_FILENAME = '.swe-search.config.json';
 
-export function loadConfig(workspaceRoot: string): Config {
+export function loadConfig(workspaceRoot: string): LoadedConfig {
   const configPath = join(workspaceRoot, CONFIG_FILENAME);
   if (!existsSync(configPath)) {
-    return configSchema.parse({});
+    return { config: configSchema.parse({}), source: null, expectedPath: configPath };
   }
   const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
-  return configSchema.parse(raw);
+  return { config: configSchema.parse(raw), source: configPath, expectedPath: configPath };
 }

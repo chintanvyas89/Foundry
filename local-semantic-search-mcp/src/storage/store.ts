@@ -42,6 +42,13 @@ export class VectorStore {
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
+    // WAL lets readers (search queries) proceed concurrently with the
+    // background indexer's writes instead of blocking on a single lock,
+    // which matters most when this process is the "loser" of the
+    // single-instance lock and only serves search. busy_timeout gives any
+    // remaining writer contention (schema migrations, checkpoints) a chance
+    // to retry instead of throwing SQLITE_BUSY straight to the caller.
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
     this.db.exec(SCHEMA);
   }
 

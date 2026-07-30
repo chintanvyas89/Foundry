@@ -8,17 +8,43 @@ import { initEmbedder } from './embedding/embedder.js';
 import { VectorStore } from './storage/store.js';
 import { Indexer } from './indexing/indexer.js';
 import { startWatcher } from './indexing/watcher.js';
+import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
-  const config = loadConfig(workspaceRoot);
+  const { config, source: configSource, expectedPath: configExpectedPath } =
+    loadConfig(workspaceRoot);
 
   // Everything below logs to stderr only — stdout is reserved for the MCP
   // stdio transport's protocol messages.
+  console.error(`[swe-search] workspace: ${workspaceRoot}`);
+  if (configSource) {
+    console.error(`[swe-search] config: ${configSource}`);
+  } else {
+    // Explicitly report the path we looked for, so a config file placed
+    // one directory too deep (e.g. inside .swe-search/) is obvious rather
+    // than silently ignored.
+    console.error(
+      `[swe-search] config: none found at ${configExpectedPath} — using defaults`,
+    );
+  }
+
   const dataDir = join(workspaceRoot, '.swe-search');
   mkdirSync(dataDir, { recursive: true });
   const store = new VectorStore(join(dataDir, 'index.db'));
+
+  // Single-instance guard for the build + watcher. If another MCP process is
+  // already indexing this workspace, we still connect the MCP transport and
+  // serve searches from the shared index (WAL keeps reads non-blocking) —
+  // we just don't run a competing indexer.
+  const holdsIndexLock = acquireLock(join(dataDir, 'lock'));
+  if (!holdsIndexLock) {
+    console.error(
+      '[swe-search] another indexer already holds the lock for this workspace — ' +
+        'this instance will serve search from the existing index only',
+    );
+  }
 
   const server = new McpServer({ name: 'local-semantic-search', version: '0.1.0' });
 
@@ -32,6 +58,11 @@ async function main() {
   const ready = (async () => {
     console.error('[swe-search] loading embedding model...');
     await initEmbedder(config);
+
+    // Only the lock holder mutates the store — everyone else stops here.
+    // The embedder is still loaded above so this instance can embed search
+    // queries against the shared read-only view of the index.
+    if (!holdsIndexLock) return;
 
     // Reject a stored index built with a different model/dtype (or a legacy
     // absolute-path index from before this version) — its vectors/paths aren't
@@ -50,9 +81,21 @@ async function main() {
     const { files, chunks, embedded, skippedFiles, prunedFiles } = await indexer.buildFull((p) => {
       const now = Date.now();
       const isLast = p.done === p.total;
+      // The first callback (done=0) fires right after the walk, before any
+      // embedding starts — surface it as its own line so an oversized walk
+      // (missing excludes, unignored generated dirs) is visible up front
+      // instead of buried in throttled progress updates.
+      if (p.done === 0) {
+        lastLog = now;
+        console.error(
+          `[swe-search] walked ${p.total} files under ignore rules — starting embedding pass`,
+        );
+        return;
+      }
+
       // Throttle to ~1 line/sec so a large repo doesn't flood the Output tab,
-      // but always emit the very first and very last updates.
-      if (p.done === 0 || isLast || now - lastLog >= 1000) {
+      // but always emit the very last update.
+      if (isLast || now - lastLog >= 1000) {
         lastLog = now;
         const pct = p.total ? Math.round((p.done / p.total) * 100) : 100;
         const pending = p.total - p.done;
