@@ -111,6 +111,10 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
   .pin { font-size: 11px; padding: 2px 7px; }
   .pin.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .loc { font-size: 11px; color: var(--vscode-textLink-foreground); margin: 2px 0 6px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .snippet { margin: 0 0 7px; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+    background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+    color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px; line-height: 1.45; white-space: pre; overflow: hidden; }
   .bar { display: flex; align-items: center; gap: 7px; }
   .track { flex: 1; height: 4px; border-radius: 3px; background: var(--vscode-input-background); overflow: hidden; }
   .fill { height: 100%; background: var(--vscode-progressBar-background); }
@@ -179,6 +183,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
           '<button class="pin ' + (pinned ? 'on' : '') + '" data-pin="' + i + '">' + (pinned ? 'Pinned' : 'Pin') + '</button>' +
         '</div>' +
         '<div class="loc" data-open="' + i + '">' + escapeHtml(r.rel) + ':' + r.startLine + '</div>' +
+        '<pre class="snippet" data-open="' + i + '">' + escapeHtml(r.snippet || '') + '</pre>' +
         '<div class="bar"><div class="track"><div class="fill" style="width:' + pct + '%"></div></div>' +
         '<span class="score">' + r.score.toFixed(3) + '</span></div>' +
       '</div>';
@@ -240,7 +245,16 @@ function toPayload(r: SearchResult) {
     startLine: r.startLine,
     endLine: r.endLine,
     score: r.score,
+    // A short code preview for the card. Trim to a handful of lines here so we
+    // don't ship whole functions into the webview.
+    snippet: firstLines(r.text, 6),
   };
+}
+
+function firstLines(text: string, n: number): string {
+  const lines = text.split('\n');
+  const head = lines.slice(0, n).join('\n');
+  return lines.length > n ? `${head}\n…` : head;
 }
 
 async function openAt(file: string, startLine: number, endLine: number): Promise<void> {

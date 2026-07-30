@@ -66,10 +66,10 @@ the shared VS Code extension host.
 ## Installing the prebuilt extension
 
 A ready-to-install package is committed alongside this README:
-`swe-search-lsp-bridge-0.3.1.vsix`.
+`swe-search-lsp-bridge-0.3.2.vsix`.
 
 ```bash
-code --install-extension swe-search-lsp-bridge-0.3.1.vsix
+code --install-extension swe-search-lsp-bridge-0.3.2.vsix
 ```
 
 Or in VS Code: **Extensions view → “…” menu → Install from VSIX…**. Reload the
