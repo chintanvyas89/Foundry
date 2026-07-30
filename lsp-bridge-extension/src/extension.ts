@@ -5,6 +5,7 @@ import { getPipePath } from './pipeName';
 import { getSymbolsForFile } from './symbolProvider';
 import { SearchClient } from './searchClient';
 import { registerSearchCommands } from './searchCommands';
+import { SearchPanelProvider } from './searchPanel';
 
 let server: net.Server | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
@@ -22,6 +23,18 @@ export function activate(context: vscode.ExtensionContext) {
   searchClient = new SearchClient(workspaceRoot, searchOutput);
   context.subscriptions.push({ dispose: () => searchClient?.dispose() });
   registerSearchCommands(context, searchClient);
+
+  // Relevance-feedback drilldown panel (sidebar).
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SearchPanelProvider.viewType,
+      new SearchPanelProvider(context.extensionUri, searchClient),
+      { webviewOptions: { retainContextWhenHidden: true } },
+    ),
+    vscode.commands.registerCommand('sweSearch.focusPanel', () =>
+      vscode.commands.executeCommand('sweSearch.panel.focus'),
+    ),
+  );
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
   statusItem.text = '$(circle-outline) LSP Bridge: starting';

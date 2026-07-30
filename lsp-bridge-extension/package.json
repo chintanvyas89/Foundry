@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -17,6 +17,24 @@
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sweSearch",
+          "title": "Semantic Search",
+          "icon": "media/search.svg"
+        }
+      ]
+    },
+    "views": {
+      "sweSearch": [
+        {
+          "id": "sweSearch.panel",
+          "name": "Search",
+          "type": "webview"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "sweSearch.searchByMeaning",
@@ -26,6 +44,11 @@
       {
         "command": "sweSearch.findSimilar",
         "title": "Find similar code",
+        "category": "Semantic Search"
+      },
+      {
+        "command": "sweSearch.focusPanel",
+        "title": "Open search panel",
         "category": "Semantic Search"
       }
     ],

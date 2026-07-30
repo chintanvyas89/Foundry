@@ -13,5 +13,6 @@ export interface IndexedChunk extends Chunk {
 }
 
 export interface SearchResult extends Chunk {
+  id: string;
   score: number;
 }

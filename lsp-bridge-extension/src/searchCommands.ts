@@ -56,7 +56,7 @@ async function runSearch(client: SearchClient, query: string, label: string): Pr
         title: `Searching for ${truncate(label, 50)}`,
         cancellable: false,
       },
-      () => client.search(query, topK),
+      () => client.search({ query, topK }),
     );
   } catch (err) {
     vscode.window.showErrorMessage(

@@ -25,6 +25,11 @@ Two commands (Command Palette, or right-click):
 - **Semantic Search: Find similar code** — select a block of code, right-click
   → *Find similar code*. Uses the selection itself as the query to surface
   semantically similar code (great for spotting duplication).
+- **Search panel** — the magnifier icon in the activity bar opens a drilldown
+  view. Pin any result (its stored vector, reused for free — no re-embedding)
+  and/or add a note to build up a *context tray* that steers the next search,
+  then **Refine** (narrow to high-confidence hits) or **Expand** (broaden). This
+  is relevance-feedback search, still with no LLM.
 
 ### One-time setup
 
@@ -61,10 +66,10 @@ the shared VS Code extension host.
 ## Installing the prebuilt extension
 
 A ready-to-install package is committed alongside this README:
-`swe-search-lsp-bridge-0.2.1.vsix`.
+`swe-search-lsp-bridge-0.3.0.vsix`.
 
 ```bash
-code --install-extension swe-search-lsp-bridge-0.2.1.vsix
+code --install-extension swe-search-lsp-bridge-0.3.0.vsix
 ```
 
 Or in VS Code: **Extensions view → “…” menu → Install from VSIX…**. Reload the

@@ -77,6 +77,18 @@ export class VectorStore {
     return map;
   }
 
+  // Stored embeddings for the given chunk ids, in no particular order (missing
+  // ids are skipped). Used by relevance feedback: "pinning" a result reuses its
+  // already-computed vector to steer the next search — no re-embedding.
+  getEmbeddingsByIds(ids: string[]): Float32Array[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(`SELECT embedding FROM chunks WHERE id IN (${placeholders})`)
+      .all(...ids) as Array<{ embedding: Uint8Array }>;
+    return rows.map((row) => blobToVector(row.embedding));
+  }
+
   getFileHash(file: string): string | null {
     const row = this.db.prepare('SELECT fileHash FROM files WHERE path = ?').get(file) as
       | { fileHash: string }
@@ -170,6 +182,7 @@ export class VectorStore {
 
   search(queryEmbedding: Float32Array, topK: number): SearchResult[] {
     const rows = this.db.prepare('SELECT * FROM chunks').all() as Array<{
+      id: string;
       file: string;
       symbol: string | null;
       startLine: number;
@@ -180,6 +193,7 @@ export class VectorStore {
     }>;
 
     const scored: SearchResult[] = rows.map((row) => ({
+      id: row.id,
       file: row.file,
       symbol: row.symbol ?? undefined,
       startLine: row.startLine,

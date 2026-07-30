@@ -2,12 +2,21 @@ import * as vscode from 'vscode';
 import { ChildProcess, spawn } from 'child_process';
 
 export interface SearchResult {
+  id: string;
   file: string;
   symbol: string | null;
   startLine: number;
   endLine: number;
   score: number;
   text: string;
+}
+
+export interface SearchParams {
+  query: string;
+  topK: number;
+  pins?: string[];
+  note?: string;
+  mode?: 'find' | 'refine' | 'expand';
 }
 
 interface Pending {
@@ -34,14 +43,20 @@ export class SearchClient {
     private readonly output: vscode.OutputChannel,
   ) {}
 
-  async search(query: string, topK: number): Promise<SearchResult[]> {
+  async search(params: SearchParams): Promise<SearchResult[]> {
     await this.ensureStarted();
+
+    const args: Record<string, unknown> = { query: params.query, topK: params.topK };
+    if (params.pins && params.pins.length) args.pins = params.pins;
+    if (params.note && params.note.trim()) args.note = params.note;
+    if (params.mode && params.mode !== 'find') args.mode = params.mode;
+
     // The first query against a freshly spawned server waits for the model to
     // load (the server gates its tool on readiness), so allow a generous
     // timeout; later queries return in well under a second.
     const result = (await this.rpc(
       'tools/call',
-      { name: 'semantic_search', arguments: { query, topK } },
+      { name: 'semantic_search', arguments: args },
       180000,
     )) as { structuredContent?: { results?: SearchResult[] } } | undefined;
 
