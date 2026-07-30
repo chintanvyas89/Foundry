@@ -114,7 +114,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
   .snippet { margin: 0 0 7px; padding: 6px 8px; border-radius: 6px; cursor: pointer;
     background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
     color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace);
-    font-size: 11px; line-height: 1.45; white-space: pre; overflow: hidden; }
+    font-size: 11px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
   .bar { display: flex; align-items: center; gap: 7px; }
   .track { flex: 1; height: 4px; border-radius: 3px; background: var(--vscode-input-background); overflow: hidden; }
   .fill { height: 100%; background: var(--vscode-progressBar-background); }
