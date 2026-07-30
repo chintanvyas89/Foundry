@@ -1,88 +1,92 @@
-# Local Semantic Search — LSP Bridge
+# Local Semantic Search — VS Code extension
 
-A thin VS Code extension with one job: answer "what are the symbols in this
-file" using VS Code's own language servers, over a local-only named
-pipe/socket, for the `local-semantic-search-mcp` server to consume.
+A local, offline, **no-LLM** semantic code search for VS Code, in two parts:
 
-**Status:** first pass, not yet build-tested — same caveat as the MCP server
-project (see its `implementation-spec.md` §9).
+1. **Search UI** — the `Search by meaning` and `Find similar code` commands.
+   They query the `local-semantic-search-mcp` server (spawned in read-only
+   query mode) and show ranked results you can jump to. No Copilot, no API
+   key, no network.
+2. **LSP bridge** — a background socket that answers "what are the symbols in
+   this file" using VS Code's own language servers, so the MCP server's
+   indexer can chunk on real symbol boundaries. Falls back to tree-sitter if
+   the bridge isn't running.
 
-## What this is (and isn't)
+Both talk to the MCP server over a local-only named pipe/socket; neither opens
+a network port.
 
-- **Is:** a background bridge. No chat UI, no commands beyond a status bar
-  indicator, no `languageModelTools` contribution.
-- **Isn't:** the `registerTool` approach discussed and deliberately deferred —
-  this extension never talks to Copilot directly. It only answers symbol
-  queries from the MCP server. Full `registerTool` integration stays a
-  future option, not built here.
+## Using the search commands
+
+Two commands (Command Palette, or right-click):
+
+- **Semantic Search: Search by meaning** — type a natural-language query
+  (`where JWT tokens are validated`) and get ranked functions/classes. Arrow
+  through the list to preview each in the editor; Enter jumps to the exact
+  lines. Default keybinding: `Ctrl+Alt+S` (`Cmd+Alt+S` on macOS).
+- **Semantic Search: Find similar code** — select a block of code, right-click
+  → *Find similar code*. Uses the selection itself as the query to surface
+  semantically similar code (great for spotting duplication).
+
+### One-time setup
+
+The commands need to know where the built search server lives. In Settings
+(`sweSearch.*`):
+
+| Setting | What it is |
+|---|---|
+| `sweSearch.serverEntry` | **Required.** Absolute path to `local-semantic-search-mcp/dist/index.js`. |
+| `sweSearch.nodePath` | Node executable to run it with. Defaults to `node`; set an absolute path if VS Code can't find node (common with nvm). |
+| `sweSearch.topK` | How many results per search (default 8). |
+
+The first search after opening a workspace spins up the server and loads the
+embedding model (a few seconds warm, longer on the very first model download);
+subsequent searches are near-instant. The server runs in **query-only** mode —
+it reads the existing index but never builds or modifies it, so it coexists
+safely with the indexer VS Code runs for Copilot.
 
 ## Why a named pipe, not a localhost port
 
-A loopback TCP port is still a listening network socket a security scanner
-will flag and someone has to explain — the same objection raised earlier
-about Ollama's `localhost:11434`. A Unix domain socket (or a Windows named
-pipe) never touches the network stack at all, and the socket file is
-chmod'd to the current user only. This was a deliberate choice, not an
-oversight.
+A loopback TCP port is still a listening network socket a security scanner will
+flag. A Unix domain socket (or a Windows named pipe) never touches the network
+stack, and the socket file is chmod'd to the current user only. Deliberate, not
+an oversight.
 
 ## Zero runtime dependencies, by design
 
-Check `package.json` — there is nothing under `dependencies`, only
-`devDependencies` for building. That means there's nothing to audit for
-telemetry or supply-chain risk in this extension at all, which matters more
-here than usual since this code runs inside the shared VS Code extension
-host process, not in its own isolated process like the MCP server.
+Check `package.json` — nothing under `dependencies`, only `devDependencies` for
+building. The search client talks to the MCP server with a hand-rolled JSON-RPC
+stdio client rather than pulling in the MCP SDK, so there's nothing to audit for
+telemetry or supply-chain risk — which matters here since this code runs inside
+the shared VS Code extension host.
+
+## Installing the prebuilt extension
+
+A ready-to-install package is committed alongside this README:
+`swe-search-lsp-bridge-0.2.0.vsix`.
+
+```bash
+code --install-extension swe-search-lsp-bridge-0.2.0.vsix
+```
+
+Or in VS Code: **Extensions view → “…” menu → Install from VSIX…**. Reload the
+window afterward. Set `sweSearch.serverEntry` (above), then try
+**Search by meaning**.
 
 ## Build & run locally (development)
 
 ```bash
 npm install
-npm run build
+npm run build   # tsc
 ```
 
-Then press `F5` in VS Code with this folder open to launch an Extension
-Development Host with the bridge active. Watch the status bar for
-`LSP Bridge: listening`.
+Press `F5` with this folder open to launch an Extension Development Host. To
+rebuild the package: `npx @vscode/vsce package`.
 
-## Installing the prebuilt extension
+## Pairing the bridge with the MCP server
 
-A ready-to-install package is committed alongside this README:
-`swe-search-lsp-bridge-0.1.0.vsix`. Install it directly:
-
-```bash
-code --install-extension swe-search-lsp-bridge-0.1.0.vsix
-```
-
-Or in VS Code: **Extensions view → “…” menu → Install from VSIX…**. Reload the
-window afterward and watch the status bar for `LSP Bridge: listening`.
-
-## Rebuilding the package yourself
-
-```bash
-npm install
-npm run build
-npx @vscode/vsce package
-```
-
-Produces a fresh `.vsix` — install as above, or publish through an internal
-extension marketplace if your org runs one.
-
-## Pairing with the MCP server
-
-No configuration needed on either side beyond both being pointed at the same
-workspace — the pipe name is derived deterministically from the workspace
-root path independently by both projects (see `src/pipeName.ts` here and
-the matching file in `local-semantic-search-mcp`). If the extension isn't
-running, the MCP server's chunker silently falls back to tree-sitter — check
-`local-semantic-search-mcp`'s logs (stderr) if you expect the bridge to be
-in use and it doesn't seem to be.
-
-## Verifying it end to end
-
-1. Open the target repo in VS Code with this extension active (status bar
-   shows "listening").
-2. Run the MCP server's indexer against the same workspace root.
-3. Check the indexer's chunk output for `symbol` fields populated with real
-   function/class/method names matching what the editor's own outline view
-   shows for those files — that's the signal the bridge tier is actually
-   being used, not the tree-sitter fallback.
+No configuration needed for the bridge itself — the pipe name is derived
+deterministically from the workspace root path by both projects (see
+`src/pipeName.ts` here and its twin in `local-semantic-search-mcp`). If the
+extension isn't running, the MCP server's chunker silently falls back to
+tree-sitter. To confirm the bridge tier is live, check the indexer's chunk
+output for `symbol` fields populated with real function/class names, or run
+`node scripts/poke-pipe.mjs <workspaceRoot> <file>`.

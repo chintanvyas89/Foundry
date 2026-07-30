@@ -40,18 +40,30 @@ export function registerSemanticSearchTool(
         return { content: [{ type: 'text', text: 'No matching code found.' }] };
       }
 
-      const text = results
+      // Stored paths are workspace-relative for portability; resolve each to an
+      // absolute path against THIS machine's workspace root so callers (the
+      // human-readable text and structured clients like the editor search
+      // panel) can open the file directly.
+      const resolved = results.map((r) => ({
+        file: join(workspaceRoot, r.file),
+        symbol: r.symbol ?? null,
+        startLine: r.startLine,
+        endLine: r.endLine,
+        score: r.score,
+        text: r.text,
+      }));
+
+      const text = resolved
         .map((r, i) => {
-          // Stored paths are workspace-relative for portability; resolve to an
-          // absolute path against THIS machine's workspace root for display.
-          const absFile = join(workspaceRoot, r.file);
-          const location = `${absFile}:${r.startLine}-${r.endLine}`;
+          const location = `${r.file}:${r.startLine}-${r.endLine}`;
           const label = r.symbol ? `${r.symbol} (${location})` : location;
           return `${i + 1}. ${label} — score ${r.score.toFixed(3)}\n\`\`\`\n${r.text}\n\`\`\``;
         })
         .join('\n\n');
 
-      return { content: [{ type: 'text', text }] };
+      // `content` is what an LLM reads; `structuredContent` is the same result
+      // set as machine-readable JSON for non-LLM UI clients.
+      return { content: [{ type: 'text', text }], structuredContent: { results: resolved } };
     },
   );
 }

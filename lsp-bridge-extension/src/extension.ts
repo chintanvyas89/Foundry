@@ -3,15 +3,25 @@ import * as net from 'net';
 import * as fs from 'fs';
 import { getPipePath } from './pipeName';
 import { getSymbolsForFile } from './symbolProvider';
+import { SearchClient } from './searchClient';
+import { registerSearchCommands } from './searchCommands';
 
 let server: net.Server | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
+let searchClient: SearchClient | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
-    return; // Nothing to bridge without an open workspace.
+    return; // Nothing to bridge or search without an open workspace.
   }
+
+  // No-LLM semantic search commands, backed by a query-only search server.
+  const searchOutput = vscode.window.createOutputChannel('Semantic Search');
+  context.subscriptions.push(searchOutput);
+  searchClient = new SearchClient(workspaceRoot, searchOutput);
+  context.subscriptions.push({ dispose: () => searchClient?.dispose() });
+  registerSearchCommands(context, searchClient);
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
   statusItem.text = '$(circle-outline) LSP Bridge: starting';
@@ -86,4 +96,5 @@ function removeStaleSocket(pipePath: string) {
 
 export function deactivate() {
   server?.close();
+  searchClient?.dispose();
 }

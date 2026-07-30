@@ -9,7 +9,7 @@ It has two parts:
 | Project | What it is |
 |---|---|
 | [`local-semantic-search-mcp/`](local-semantic-search-mcp/) | The MCP server. Walks the workspace, chunks code, embeds each chunk in-process (ONNX), stores vectors in SQLite, and answers a `semantic_search` tool over stdio. |
-| [`lsp-bridge-extension/`](lsp-bridge-extension/) | An optional VS Code extension that feeds the server real language-server symbols over a local named pipe, for better chunk boundaries. Falls back to tree-sitter if absent. |
+| [`lsp-bridge-extension/`](lsp-bridge-extension/) | A VS Code extension with two roles: (1) **no-LLM search UI** — `Search by meaning` / `Find similar code` commands that query the server directly and jump to results; (2) an optional **LSP bridge** that feeds the server real language-server symbols over a local named pipe for better chunk boundaries (falls back to tree-sitter if absent). |
 
 Chunking is three-tiered, richest source first: **LSP bridge** → **tree-sitter**
 → **fixed-window**. Everything works with just the MCP server; the extension is a
@@ -76,23 +76,38 @@ Then in VS Code:
 > that window waits for it to finish. Subsequent restarts are near-instant
 > (unchanged files are skipped).
 
-### 3. (Optional) Install the LSP bridge extension
+### 3. (Optional) Install the VS Code extension
 
-This turns on the top chunking tier — real editor-grade symbols instead of
-tree-sitter. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.1.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.1.0.vsix):
+The extension adds two things — a no-LLM search UI and the top chunking tier —
+and neither requires Copilot. A prebuilt `.vsix` is committed at
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.2.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.2.0.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.1.0.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.2.0.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
-file.
+file. Reload the window afterward.
 
-After installing, reload VS Code. The status bar shows **`LSP Bridge: listening`**
-when it's active. No configuration is needed — the server and the extension derive
-the same pipe name from the workspace path independently, so they just connect. If
-the extension isn't running, the server silently falls back to tree-sitter.
+**Search without Copilot (no LLM).** Point the extension at the built server
+once — Settings → `sweSearch.serverEntry` = the absolute path to
+`local-semantic-search-mcp/dist/index.js` (and `sweSearch.nodePath` to an
+absolute node path if VS Code can't find `node`). Then:
+
+- **Semantic Search: Search by meaning** (`Ctrl/Cmd+Alt+S`) — type a query, arrow
+  through ranked results with live preview, Enter to jump to the exact lines.
+- **Semantic Search: Find similar code** — select code, right-click → *Find
+  similar code*.
+
+These spawn the server in **query-only** mode (reads the index, never builds or
+modifies it), so they coexist with the Copilot-driven server on the same
+`index.db`.
+
+**LSP bridge (better chunks).** With the extension running, the status bar shows
+**`LSP Bridge: listening`** — the server then chunks on real editor symbols
+instead of tree-sitter. No configuration needed; the server and extension derive
+the same pipe name from the workspace path independently. If the extension isn't
+running, the server silently falls back to tree-sitter.
 
 To rebuild the `.vsix` yourself:
 

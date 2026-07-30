@@ -1,8 +1,8 @@
 {
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
-  "description": "Exposes VS Code's language-server symbol data to the local semantic search MCP server over a local-only named pipe. No network access, no chat UI, no runtime dependencies beyond VS Code itself.",
-  "version": "0.1.0",
+  "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
+  "version": "0.2.0",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -16,6 +16,58 @@
   "categories": ["Other"],
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sweSearch.searchByMeaning",
+        "title": "Search by meaning",
+        "category": "Semantic Search"
+      },
+      {
+        "command": "sweSearch.findSimilar",
+        "title": "Find similar code",
+        "category": "Semantic Search"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "sweSearch.findSimilar",
+          "when": "editorHasSelection",
+          "group": "navigation@99"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "sweSearch.searchByMeaning",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s"
+      }
+    ],
+    "configuration": {
+      "title": "Local Semantic Search",
+      "properties": {
+        "sweSearch.serverEntry": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the built MCP server entry, e.g. `/path/to/local-semantic-search-mcp/dist/index.js`. Required for the **Search by meaning** and **Find similar** commands."
+        },
+        "sweSearch.nodePath": {
+          "type": "string",
+          "default": "node",
+          "description": "Path to the Node.js executable used to run the search server. Set an absolute path if VS Code can't find node (common with nvm), e.g. /home/you/.nvm/versions/node/vXX/bin/node."
+        },
+        "sweSearch.topK": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "How many results each search returns."
+        }
+      }
+    }
+  },
   "scripts": {
     "build": "tsc -p .",
     "package": "vsce package"

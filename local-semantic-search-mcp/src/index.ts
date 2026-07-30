@@ -34,12 +34,22 @@ async function main() {
   mkdirSync(dataDir, { recursive: true });
   const store = new VectorStore(join(dataDir, 'index.db'));
 
+  // Query-only mode: never build, watch, or mutate the index — just load the
+  // embedder and answer searches against whatever index already exists. This
+  // is what a read-only client (e.g. the editor search panel) spawns so it can
+  // query without spinning up a competing indexer or rebuilding on a model
+  // mismatch. It deliberately does not touch the lock.
+  const queryOnly =
+    process.env.SWE_SEARCH_QUERY_ONLY === '1' || process.argv.includes('--query-only');
+
   // Single-instance guard for the build + watcher. If another MCP process is
   // already indexing this workspace, we still connect the MCP transport and
   // serve searches from the shared index (WAL keeps reads non-blocking) —
   // we just don't run a competing indexer.
-  const holdsIndexLock = acquireLock(join(dataDir, 'lock'));
-  if (!holdsIndexLock) {
+  const holdsIndexLock = queryOnly ? false : acquireLock(join(dataDir, 'lock'));
+  if (queryOnly) {
+    console.error('[swe-search] query-only mode — serving search against the existing index');
+  } else if (!holdsIndexLock) {
     console.error(
       '[swe-search] another indexer already holds the lock for this workspace — ' +
         'this instance will serve search from the existing index only',
