@@ -80,10 +80,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.2.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.2.0.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.2.1.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.2.1.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.2.0.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.2.1.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that

@@ -21,7 +21,7 @@ async function searchByMeaning(client: SearchClient): Promise<void> {
     placeHolder: 'where JWT tokens are validated',
   });
   if (!query || !query.trim()) return;
-  await runSearch(client, query, `Searching for "${truncate(query, 40)}"`);
+  await runSearch(client, query, query);
 }
 
 async function findSimilar(client: SearchClient): Promise<void> {
@@ -38,16 +38,24 @@ async function findSimilar(client: SearchClient): Promise<void> {
     vscode.window.showInformationMessage('Select some code to find similar code.');
     return;
   }
-  await runSearch(client, text, 'Finding similar code…');
+  await runSearch(client, text, 'code similar to the selection');
 }
 
-async function runSearch(client: SearchClient, query: string, title: string): Promise<void> {
+// `query` is what gets embedded; `label` is a short human description of the
+// search, kept visible in the results title (the QuickPick input box itself is
+// left empty so it can filter the results — putting the query back there would
+// make VS Code hide any result that doesn't fuzzy-match it).
+async function runSearch(client: SearchClient, query: string, label: string): Promise<void> {
   const topK = vscode.workspace.getConfiguration('sweSearch').get<number>('topK') ?? 8;
 
   let results: SearchResult[];
   try {
     results = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title, cancellable: false },
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Searching for ${truncate(label, 50)}`,
+        cancellable: false,
+      },
       () => client.search(query, topK),
     );
   } catch (err) {
@@ -58,17 +66,17 @@ async function runSearch(client: SearchClient, query: string, title: string): Pr
   }
 
   if (results.length === 0) {
-    vscode.window.showInformationMessage('No matching code found.');
+    vscode.window.showInformationMessage(`No matching code found for ${truncate(label, 50)}.`);
     return;
   }
-  showResults(results);
+  showResults(results, label);
 }
 
 interface ResultItem extends vscode.QuickPickItem {
   result: SearchResult;
 }
 
-function showResults(results: SearchResult[]): void {
+function showResults(results: SearchResult[], label: string): void {
   const items: ResultItem[] = results.map((r) => {
     const name = r.file.split(/[\\/]/).pop() ?? r.file;
     return {
@@ -80,8 +88,9 @@ function showResults(results: SearchResult[]): void {
   });
 
   const qp = vscode.window.createQuickPick<ResultItem>();
-  qp.title = `Semantic search — ${results.length} result${results.length === 1 ? '' : 's'}`;
-  qp.placeholder = 'Select a result to jump to it';
+  const count = `${results.length} result${results.length === 1 ? '' : 's'}`;
+  qp.title = `Results for ${truncate(label, 45)} — ${count}`;
+  qp.placeholder = 'Type to filter these results, or select one to jump to it';
   qp.items = items;
   qp.matchOnDescription = true;
   qp.matchOnDetail = true;
