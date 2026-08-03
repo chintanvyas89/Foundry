@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { SearchClient, SearchResult } from './searchClient';
 import { getCallHierarchy, CallNode } from './callHierarchy';
+import { getReferences } from './references';
 
 // Sidebar webview that drives relevance-feedback search: a query box, a context
 // tray (pinned results + a note) that steers the next search, and Refine/Expand
@@ -29,6 +30,8 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
         await openAt(msg.file, msg.startLine, msg.endLine);
       } else if (msg?.type === 'trace') {
         await this.runTrace(view.webview, msg);
+      } else if (msg?.type === 'refs') {
+        await this.runRefs(view.webview, msg);
       }
     });
   }
@@ -107,6 +110,29 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
           outgoing: calls.outgoing.map(withRel),
           incoming: calls.incoming.map(withRel),
         },
+      });
+    } catch (err) {
+      webview.postMessage({
+        type: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      webview.postMessage({ type: 'busy', busy: false });
+    }
+  }
+
+  private async runRefs(
+    webview: vscode.Webview,
+    msg: { file?: string; line?: number; symbol?: string },
+  ): Promise<void> {
+    if (!msg.file || !msg.line) return;
+    webview.postMessage({ type: 'busy', busy: true });
+    try {
+      const refs = await getReferences(msg.file, msg.line, msg.symbol);
+      webview.postMessage({
+        type: 'reflist',
+        symbol: msg.symbol ?? '',
+        refs: refs.map((r) => ({ ...r, rel: vscode.workspace.asRelativePath(r.file) })),
       });
     } catch (err) {
       webview.postMessage({
@@ -261,6 +287,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
           '<span class="sym" data-open="' + i + '" title="' + escapeHtml(r.rel) + '">' + escapeHtml(name) + '</span>' +
           '<span class="btns">' +
             '<button class="pin" data-trace="' + i + '" title="Trace callers and callees">Calls</button>' +
+            '<button class="pin" data-refs="' + i + '" title="Find usages / references">Uses</button>' +
             '<button class="pin ' + (pinned ? 'on' : '') + '" data-pin="' + i + '">' + (pinned ? 'Pinned' : 'Pin') + '</button>' +
           '</span>' +
         '</div>' +
@@ -293,11 +320,23 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
         trace(r.file, r.startLine, r.symbol);
       });
     });
+    el.querySelectorAll('[data-refs]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const r = state.results[Number(btn.dataset.refs)];
+        refs(r.file, r.startLine, r.symbol);
+      });
+    });
   }
 
   function trace(file, line, symbol) {
     $('status').textContent = 'Tracing calls…';
     vscode.postMessage({ type: 'trace', file, line, symbol });
+  }
+
+  function refs(file, line, symbol) {
+    $('status').textContent = 'Finding usages…';
+    vscode.postMessage({ type: 'refs', file, line, symbol });
   }
 
   function showResults() {
@@ -326,6 +365,30 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
     });
     t.querySelectorAll('[data-trace2]').forEach((btn) => {
       btn.addEventListener('click', () => trace(btn.dataset.file, Number(btn.dataset.line), btn.dataset.name));
+    });
+  }
+
+  function renderRefs(m) {
+    const t = $('trace');
+    const back = '<div class="trace-head"><button id="tback">← Results</button>' +
+      '<span class="trace-title">Usages' + (m.symbol ? ' of ' + escapeHtml(m.symbol) : '') + '</span></div>';
+    if (!m.refs.length) {
+      t.innerHTML = back + '<div class="muted">No usages found — the language server may not support references here, or there are none.</div>';
+    } else {
+      t.innerHTML = back + '<div class="sec">References (' + m.refs.length + ')</div>' + m.refs.map((n) =>
+        '<div class="cnode">' +
+          '<span class="cname" data-file="' + escapeHtml(n.file) + '" data-line="' + n.line + '">' +
+            escapeHtml(n.rel) + ':' + n.line + (n.text ? '  <span class="cloc">' + escapeHtml(n.text) + '</span>' : '') +
+          '</span>' +
+        '</div>').join('');
+    }
+    $('results').classList.add('hidden');
+    t.classList.remove('hidden');
+    $('tback').addEventListener('click', showResults);
+    t.querySelectorAll('.cname').forEach((el) => {
+      el.addEventListener('click', () => vscode.postMessage({
+        type: 'open', file: el.dataset.file, startLine: Number(el.dataset.line), endLine: Number(el.dataset.line),
+      }));
     });
   }
 
@@ -361,6 +424,9 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
       renderResults();
     } else if (m.type === 'calls') {
       renderTrace(m.calls);
+      $('status').textContent = '';
+    } else if (m.type === 'reflist') {
+      renderRefs(m);
       $('status').textContent = '';
     } else if (m.type === 'busy') {
       if (m.busy) $('status').textContent = 'Searching…';

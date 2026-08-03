@@ -46,15 +46,14 @@ export async function getCallHierarchy(
   };
 }
 
-// Resolve a call-hierarchy item, placing the cursor on the symbol name when we
-// know it (more reliable than the line start, which may sit on a keyword).
-async function prepare(
-  file: string,
+// A 1-based line, plus a symbol name, resolved to a precise position on that
+// symbol's identifier — more reliable for LSP providers than the line start,
+// which may sit on a keyword. Shared by call hierarchy and references.
+export function positionOf(
+  doc: vscode.TextDocument,
   line: number,
   symbol?: string,
-): Promise<vscode.CallHierarchyItem | undefined> {
-  const uri = vscode.Uri.file(file);
-  const doc = await vscode.workspace.openTextDocument(uri);
+): vscode.Position {
   const lineIdx = Math.min(Math.max(0, line - 1), doc.lineCount - 1);
   const textLine = doc.lineAt(lineIdx);
   let character = textLine.firstNonWhitespaceCharacterIndex;
@@ -62,10 +61,20 @@ async function prepare(
     const at = textLine.text.indexOf(symbol);
     if (at >= 0) character = at;
   }
+  return new vscode.Position(lineIdx, character);
+}
+
+async function prepare(
+  file: string,
+  line: number,
+  symbol?: string,
+): Promise<vscode.CallHierarchyItem | undefined> {
+  const uri = vscode.Uri.file(file);
+  const doc = await vscode.workspace.openTextDocument(uri);
   const items = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
     'vscode.prepareCallHierarchy',
     uri,
-    new vscode.Position(lineIdx, character),
+    positionOf(doc, line, symbol),
   );
   return items && items[0];
 }

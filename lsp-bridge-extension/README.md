@@ -29,17 +29,18 @@ Two commands (Command Palette, or right-click):
   view. Pin any result (its stored vector, reused for free — no re-embedding)
   and/or add a note to build up a *context tray* that steers the next search,
   then **Refine** (narrow to high-confidence hits) or **Expand** (broaden). This
-  is relevance-feedback search, still with no LLM. Each result also has a
-  **Calls** button that traces its callers/callees (call graph / execution flow)
-  via the language server; click a call to open it or trace further.
+  is relevance-feedback search, still with no LLM. Each result also has **Calls**
+  (callers/callees — call graph) and **Uses** (references across the workspace)
+  buttons, powered by the language server; click any entry to open it.
 
 The search box also has a **Symbol name** toggle — switch it on to look up a
 function/class by exact or partial name instead of by meaning.
 
-For Copilot, alongside `semantic_search` the server exposes a **`search_symbol`**
-tool (exact/partial name lookup) and a **`trace_calls`** tool (call graph — pass a
-`semantic_search` result's `file`/`line`). Call graph needs a language server for
-the file and can't resolve dynamic dispatch, cross-language calls, or data flow.
+For Copilot, the server exposes five MCP tools: `semantic_search` (meaning),
+`search_symbol` (name), `trace_calls` (call graph), `find_usages` (references),
+and `find_implementations`. The language-server-backed ones (last three) take a
+result's `file`/`line`, need the bridge running, and can't resolve dynamic
+dispatch, cross-language calls, or data flow.
 
 ### One-time setup
 
@@ -76,10 +77,10 @@ the shared VS Code extension host.
 ## Installing the prebuilt extension
 
 A ready-to-install package is committed alongside this README:
-`swe-search-lsp-bridge-0.5.0.vsix`.
+`swe-search-lsp-bridge-0.6.0.vsix`.
 
 ```bash
-code --install-extension swe-search-lsp-bridge-0.5.0.vsix
+code --install-extension swe-search-lsp-bridge-0.6.0.vsix
 ```
 
 Or in VS Code: **Extensions view → “…” menu → Install from VSIX…**. Reload the

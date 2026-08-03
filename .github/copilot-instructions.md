@@ -75,3 +75,8 @@ flow".
 Trace calls needs the VS Code LSP bridge running and can't resolve dynamic
 dispatch (interfaces/callbacks/DI), cross-language calls, or data flow — for
 those, fall back to semantic_search (it finds likely candidates by meaning).
+
+Related bridge-backed tools (same file/line inputs): **find_usages** lists every
+reference to a symbol across the workspace (use for "where is X used?" and impact
+analysis before a change), and **find_implementations** finds the concrete
+implementations of an interface/abstract member.

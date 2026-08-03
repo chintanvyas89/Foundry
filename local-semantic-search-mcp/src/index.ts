@@ -12,6 +12,7 @@ import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
 import { registerSearchSymbolTool } from './tools/searchSymbol.js';
 import { registerTraceCallsTool } from './tools/traceCalls.js';
+import { registerSymbolRefTools } from './tools/symbolRefs.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -135,6 +136,8 @@ async function main() {
   // Call-graph tool. Doesn't touch the embedder/store — it asks the LSP bridge
   // — so it needs no `ready` gate and works in query-only mode too.
   registerTraceCallsTool(server, workspaceRoot);
+  // find_usages / find_implementations — also bridge-backed, no gate needed.
+  registerSymbolRefTools(server, workspaceRoot);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

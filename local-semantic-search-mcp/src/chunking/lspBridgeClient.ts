@@ -22,10 +22,17 @@ export interface BridgeCallHierarchy {
   incoming: BridgeCallNode[];
 }
 
+export interface BridgeRef {
+  file: string;
+  line: number;
+  text: string;
+}
+
 interface BridgeResponse {
   id: string;
   symbols?: BridgeSymbol[];
   calls?: BridgeCallHierarchy;
+  refs?: BridgeRef[];
   error?: string;
 }
 
@@ -153,4 +160,27 @@ export async function getCallHierarchyViaBridge(
 ): Promise<BridgeCallHierarchy | null> {
   const msg = await sendRequest(workspaceRoot, { type: 'callHierarchy', file, line, symbol });
   return msg?.calls ?? null;
+}
+
+// References (usages) of the symbol at (file, line). Returns null when the
+// bridge isn't reachable; an empty array when there are none.
+export async function getReferencesViaBridge(
+  workspaceRoot: string,
+  file: string,
+  line: number,
+  symbol?: string,
+): Promise<BridgeRef[] | null> {
+  const msg = await sendRequest(workspaceRoot, { type: 'references', file, line, symbol });
+  return msg ? (msg.refs ?? []) : null;
+}
+
+// Concrete implementations of the interface/abstract symbol at (file, line).
+export async function getImplementationsViaBridge(
+  workspaceRoot: string,
+  file: string,
+  line: number,
+  symbol?: string,
+): Promise<BridgeRef[] | null> {
+  const msg = await sendRequest(workspaceRoot, { type: 'implementations', file, line, symbol });
+  return msg ? (msg.refs ?? []) : null;
 }

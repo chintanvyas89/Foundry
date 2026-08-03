@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { getPipePath } from './pipeName';
 import { getSymbolsForFile } from './symbolProvider';
 import { getCallHierarchy } from './callHierarchy';
+import { getReferences, getImplementations } from './references';
 import { SearchClient } from './searchClient';
 import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
@@ -95,6 +96,12 @@ async function handleRequest(socket: net.Socket, line: string) {
     if (msg.type === 'callHierarchy') {
       const calls = await getCallHierarchy(msg.file, msg.line ?? 1, msg.symbol);
       socket.write(JSON.stringify({ id: msg.id, calls }) + '\n');
+    } else if (msg.type === 'references') {
+      const refs = await getReferences(msg.file, msg.line ?? 1, msg.symbol);
+      socket.write(JSON.stringify({ id: msg.id, refs }) + '\n');
+    } else if (msg.type === 'implementations') {
+      const refs = await getImplementations(msg.file, msg.line ?? 1, msg.symbol);
+      socket.write(JSON.stringify({ id: msg.id, refs }) + '\n');
     } else {
       const symbols = await getSymbolsForFile(msg.file);
       socket.write(JSON.stringify({ id: msg.id, symbols }) + '\n');
