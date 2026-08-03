@@ -23,6 +23,8 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (msg) => {
       if (msg?.type === 'search') {
         await this.runSearch(view.webview, msg);
+      } else if (msg?.type === 'searchSymbol') {
+        await this.runSymbolSearch(view.webview, msg);
       } else if (msg?.type === 'open') {
         await openAt(msg.file, msg.startLine, msg.endLine);
       } else if (msg?.type === 'trace') {
@@ -56,6 +58,30 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
         mode: msg.mode ?? 'find',
         results: results.map(toPayload),
       });
+    } catch (err) {
+      webview.postMessage({
+        type: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      webview.postMessage({ type: 'busy', busy: false });
+    }
+  }
+
+  private async runSymbolSearch(
+    webview: vscode.Webview,
+    msg: { query?: string },
+  ): Promise<void> {
+    const name = (msg.query ?? '').trim();
+    if (!name) {
+      webview.postMessage({ type: 'error', message: 'Enter a symbol name.' });
+      return;
+    }
+    const topK = vscode.workspace.getConfiguration('sweSearch').get<number>('topK') ?? 8;
+    webview.postMessage({ type: 'busy', busy: true });
+    try {
+      const results = await this.client.searchSymbol(name, topK);
+      webview.postMessage({ type: 'results', mode: 'symbol', results: results.map(toPayload) });
     } catch (err) {
       webview.postMessage({
         type: 'error',
@@ -131,6 +157,8 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
   .chip .x { cursor: pointer; opacity: .8; }
   .chip .x:hover { opacity: 1; }
   .muted { opacity: .6; font-size: 12px; }
+  .opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; opacity: .85; margin: -2px 0 9px; cursor: pointer; }
+  .opt input { margin: 0; }
   .status { min-height: 16px; font-size: 12px; opacity: .8; margin-bottom: 6px; }
   .card { border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 8px 9px; margin-bottom: 7px; }
   .card:hover { border-color: var(--vscode-focusBorder); }
@@ -164,6 +192,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
     <input type="text" id="query" placeholder="Search by meaning…" />
     <button class="primary" id="go">Search</button>
   </div>
+  <label class="opt"><input type="checkbox" id="symbolMode" /> Symbol name (exact match, not meaning)</label>
 
   <div class="tray">
     <div class="tray-label">Context steering the search</div>
@@ -207,6 +236,17 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
       note: $('note').value,
       pins: state.pins.map((p) => p.id),
     });
+  }
+
+  // Go button / Enter: symbol-name lookup when the toggle is on, else meaning.
+  function submit() {
+    const query = $('query').value.trim();
+    if (!query) { $('status').textContent = 'Enter something to search for.'; return; }
+    if ($('symbolMode').checked) {
+      vscode.postMessage({ type: 'searchSymbol', query });
+    } else {
+      search('find');
+    }
   }
 
   function renderResults() {
@@ -301,20 +341,23 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
 
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
-  $('go').addEventListener('click', () => search('find'));
+  $('go').addEventListener('click', submit);
   $('refine').addEventListener('click', () => search('refine'));
   $('expand').addEventListener('click', () => search('expand'));
   $('clear').addEventListener('click', () => { state.pins = []; $('note').value = ''; renderPins(); renderResults(); });
-  $('query').addEventListener('keydown', (e) => { if (e.key === 'Enter') search('find'); });
+  $('query').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
   $('note').addEventListener('input', renderPins);
+  $('symbolMode').addEventListener('change', () => {
+    $('query').placeholder = $('symbolMode').checked ? 'Symbol name, e.g. VectorStore' : 'Search by meaning…';
+  });
 
   window.addEventListener('message', (e) => {
     const m = e.data;
     if (m.type === 'results') {
       state.results = m.results;
       showResults();
-      const label = m.mode === 'refine' ? 'refined' : m.mode === 'expand' ? 'expanded' : 'found';
-      $('status').textContent = m.results.length ? m.results.length + ' results (' + label + ')' : 'No matching code found.';
+      const label = m.mode === 'refine' ? 'refined' : m.mode === 'expand' ? 'expanded' : m.mode === 'symbol' ? 'by name' : 'found';
+      $('status').textContent = m.results.length ? m.results.length + ' results (' + label + ')' : (m.mode === 'symbol' ? 'No symbol matches.' : 'No matching code found.');
       renderResults();
     } else if (m.type === 'calls') {
       renderTrace(m.calls);

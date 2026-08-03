@@ -20,6 +20,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - Incremental content-hash indexing + chokidar watcher (skips unchanged files, reuses chunk embeddings) — `src/indexing/indexer.ts`, `src/indexing/watcher.ts`
 - Three-tier chunking: LSP bridge → tree-sitter → fixed-window — `src/chunking/*`
 - **Call graph / execution flow (on-demand)**: callers/callees via the language server, exposed as a panel **Calls** action and a **`trace_calls`** MCP tool — `lsp-bridge-extension/src/callHierarchy.ts`, `local-semantic-search-mcp/src/tools/traceCalls.ts`, `src/chunking/lspBridgeClient.ts`
+- **Symbol-name search**: `search_symbol` MCP tool + panel "Symbol name" toggle — exact/prefix/substring lookup over indexed symbols; the exact-identifier complement to embedding search — `local-semantic-search-mcp/src/tools/searchSymbol.ts`, `store.searchSymbols`
 
 **Beyond the original vision** (built, though not in the 16 phases)
 - Relevance feedback: `pins` / `note` / `mode` (refine/expand), incl. **pin-by-result-number** so the LLM can steer without exposing chunk ids — `src/tools/semanticSearch.ts`
@@ -35,7 +36,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **LSP symbols (Ph2):** fetched via the bridge for *chunk boundaries* only — not persisted or queryable — `lsp-bridge-extension/src/symbolProvider.ts`, `src/chunking/lspBridgeClient.ts`.
 - **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
 - **Retrieval / context expansion (Ph10/12):** embedding search + vector-blend relevance feedback; no intent detection, FTS, graph traversal, or structural (caller/callee/test) expansion.
-- **MCP tools (Ph13):** 2 of 12 (`semantic_search`, `trace_calls`).
+- **MCP tools (Ph13):** 3 of 12 (`semantic_search`, `search_symbol`, `trace_calls`).
 - **Tree-sitter (Ph14):** chunking only; no import/symbol/relationship extraction.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
 
@@ -57,8 +58,11 @@ pipe (`src/chunking/lspBridgeClient.ts` → `getCallHierarchyViaBridge`,
   `query.mjs` CLI returns nothing; cannot resolve dynamic dispatch,
   cross-language, or data flow (semantic search stays the complement).
 
-### 2. Persisted symbol index + tools (Ph2/3)
-`search_symbol`, `find_usages`, `find_implementations` — the foundation the call graph reuses.
+### 2. Persisted symbol index + tools (Ph2/3) — partly done
+`search_symbol` shipped (name lookup over indexed chunk symbols). **Still open:**
+a dedicated `symbols` table (currently reuses `chunks.symbol`), plus `find_usages`
+/ `find_implementations` (references/implementations via the bridge, mirroring
+`trace_calls`).
 
 ### 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10)
 Add SQLite FTS5 and blend exact-match → FTS → embeddings, fixing the exact-identifier weakness of pure semantic search.

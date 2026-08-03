@@ -64,6 +64,17 @@ export class SearchClient {
     return Array.isArray(results) ? results : [];
   }
 
+  async searchSymbol(name: string, limit: number): Promise<SearchResult[]> {
+    await this.ensureStarted();
+    const result = (await this.rpc(
+      'tools/call',
+      { name: 'search_symbol', arguments: { name, limit } },
+      180000,
+    )) as { structuredContent?: { results?: SearchResult[] } } | undefined;
+    const results = result?.structuredContent?.results;
+    return Array.isArray(results) ? results : [];
+  }
+
   dispose(): void {
     if (this.proc && !this.proc.killed) {
       this.proc.kill();

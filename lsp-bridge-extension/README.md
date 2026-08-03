@@ -33,7 +33,11 @@ Two commands (Command Palette, or right-click):
   **Calls** button that traces its callers/callees (call graph / execution flow)
   via the language server; click a call to open it or trace further.
 
-The same call graph is exposed to Copilot as a **`trace_calls`** MCP tool (pass a
+The search box also has a **Symbol name** toggle — switch it on to look up a
+function/class by exact or partial name instead of by meaning.
+
+For Copilot, alongside `semantic_search` the server exposes a **`search_symbol`**
+tool (exact/partial name lookup) and a **`trace_calls`** tool (call graph — pass a
 `semantic_search` result's `file`/`line`). Call graph needs a language server for
 the file and can't resolve dynamic dispatch, cross-language calls, or data flow.
 
@@ -72,10 +76,10 @@ the shared VS Code extension host.
 ## Installing the prebuilt extension
 
 A ready-to-install package is committed alongside this README:
-`swe-search-lsp-bridge-0.4.0.vsix`.
+`swe-search-lsp-bridge-0.5.0.vsix`.
 
 ```bash
-code --install-extension swe-search-lsp-bridge-0.4.0.vsix
+code --install-extension swe-search-lsp-bridge-0.5.0.vsix
 ```
 
 Or in VS Code: **Extensions view → “…” menu → Install from VSIX…**. Reload the

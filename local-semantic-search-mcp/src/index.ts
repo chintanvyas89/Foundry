@@ -10,6 +10,7 @@ import { Indexer } from './indexing/indexer.js';
 import { startWatcher } from './indexing/watcher.js';
 import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
+import { registerSearchSymbolTool } from './tools/searchSymbol.js';
 import { registerTraceCallsTool } from './tools/traceCalls.js';
 
 async function main() {
@@ -128,6 +129,9 @@ async function main() {
   ready.catch((err) => console.error('[swe-search] background init failed:', err));
 
   registerSemanticSearchTool(server, store, config, workspaceRoot, ready);
+  // Symbol-name lookup over the stored index — no embedder needed, so no `ready`
+  // gate; returns whatever is already indexed.
+  registerSearchSymbolTool(server, store, config, workspaceRoot);
   // Call-graph tool. Doesn't touch the embedder/store — it asks the LSP bridge
   // — so it needs no `ready` gate and works in query-only mode too.
   registerTraceCallsTool(server, workspaceRoot);

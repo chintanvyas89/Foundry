@@ -207,6 +207,32 @@ export class VectorStore {
     return scored.slice(0, topK);
   }
 
+  // Name-based symbol lookup over the already-indexed chunks (which carry a
+  // `symbol` from the LSP bridge / tree-sitter). Case-insensitive substring
+  // match; ranking (exact > prefix > substring) is left to the caller. Powers
+  // the search_symbol tool — the exact-identifier complement to embedding search.
+  searchSymbols(
+    query: string,
+    cap = 200,
+  ): Array<{ id: string; file: string; symbol: string; startLine: number; endLine: number; text: string }> {
+    // Escape LIKE wildcards so a symbol fragment is matched literally.
+    const escaped = query.replace(/[%_\\]/g, '\\$&');
+    const rows = this.db
+      .prepare(
+        `SELECT id, file, symbol, startLine, endLine, text FROM chunks
+         WHERE symbol IS NOT NULL AND symbol LIKE ? ESCAPE '\\' LIMIT ?`,
+      )
+      .all(`%${escaped}%`, cap) as Array<{
+      id: string;
+      file: string;
+      symbol: string;
+      startLine: number;
+      endLine: number;
+      text: string;
+    }>;
+    return rows;
+  }
+
   close(): void {
     this.db.close();
   }
