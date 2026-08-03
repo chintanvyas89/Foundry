@@ -34,10 +34,13 @@ export function registerSemanticSearchTool(
       'reading files or grepping — to answer "where is X implemented?", "what code ' +
       'handles Y?", or "find code similar to Z" across this codebase. It ranks the ' +
       'most relevant functions/classes by semantic similarity to a natural-language ' +
-      'or code query (not keyword match) and returns each with its file path, line ' +
-      'range, and the code itself, so you can jump straight to the right place ' +
-      'instead of scanning files one by one. Prefer this over file-reading for ' +
-      'locating or exploring unfamiliar code. ' +
+      'or code query (not keyword match). ' +
+      'BY DEFAULT it returns a TOKEN-LEAN list: each hit as its symbol, file:line ' +
+      'range, score, and one-line signature — enough to pick the right place without ' +
+      'pulling whole function bodies into context. To read the full code of specific ' +
+      'hits, call again with expand=[n,...] (the NUMBERS from the list; no need to ' +
+      'repeat the query), or open the file at the given line range. Pass detail="full" ' +
+      'to get every result\'s full body at once. ' +
       'TO DRILL DOWN, call it again: set mode="refine" to narrow to high-confidence ' +
       'hits or mode="expand" to broaden; add a note to sharpen intent; and/or pass ' +
       'pinResults with the NUMBERS of the previous results you found on-target (e.g. ' +
@@ -45,8 +48,28 @@ export function registerSemanticSearchTool(
     {
       query: z
         .string()
-        .describe('What to find, in natural language or code, e.g. "where JWT tokens are validated"'),
+        .optional()
+        .describe(
+          'What to find, in natural language or code, e.g. "where JWT tokens are ' +
+            'validated". Required unless you are using expand to fetch full code of ' +
+            'previous results.',
+        ),
       topK: z.number().int().positive().optional().describe('How many results to return (default 8)'),
+      detail: z
+        .enum(['compact', 'full'])
+        .optional()
+        .describe(
+          'compact (default): symbol + location + score + one-line signature per hit ' +
+            '(token-lean). full: include each hit\'s complete code body.',
+        ),
+      expand: z
+        .array(z.number().int().positive())
+        .optional()
+        .describe(
+          'Result NUMBERS from your PREVIOUS semantic_search call whose full code you ' +
+            'want (e.g. [1, 3]). Returns those bodies without re-running the search; no ' +
+            'query needed.',
+        ),
       pinResults: z
         .array(z.number().int().positive())
         .optional()
@@ -71,11 +94,52 @@ export function registerSemanticSearchTool(
             'non-LLM UI clients. Prefer pinResults if you are working from the text output.',
         ),
     },
-    async ({ query, topK, pins, pinResults, note, mode }) => {
+    async ({ query, topK, pins, pinResults, note, mode, detail, expand }) => {
       // Block until the background model load + initial index have finished.
       // A query that arrives during startup waits here rather than running
       // against a not-yet-loaded embedder or an empty store.
       await ready;
+
+      // Expand-on-request: return the full code of specific PRIOR results by
+      // their number, without re-embedding or re-searching. This is the other
+      // half of the compact-by-default contract — the model triages on cheap
+      // signatures, then pulls only the bodies it actually needs.
+      if (expand && expand.length > 0) {
+        const ids = expand
+          .map((n) => lastResultIds[n - 1])
+          .filter((id): id is string => Boolean(id));
+        const rows = store.getChunksByIds(ids);
+        if (rows.length === 0) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  'Nothing to expand — those result numbers are not from the last ' +
+                  'search. Run semantic_search first, then expand its result numbers.',
+              },
+            ],
+            structuredContent: { results: [] },
+          };
+        }
+        const resolvedExpand = rows.map((r) => resolveResult(r, workspaceRoot));
+        return {
+          content: [{ type: 'text', text: renderFull(resolvedExpand, false) }],
+          structuredContent: { results: resolvedExpand },
+        };
+      }
+
+      if (!query || !query.trim()) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'Provide a query to search for, or expand=[n,...] to fetch full code of previous results.',
+            },
+          ],
+          structuredContent: { results: [] },
+        };
+      }
 
       const tuning = MODES[mode ?? 'find'];
 
@@ -133,27 +197,82 @@ export function registerSemanticSearchTool(
       // human-readable text and structured clients like the editor search
       // panel) can open the file directly. `id` is passed through opaquely so a
       // client can pin the result back for relevance feedback.
-      const resolved = results.map((r) => ({
-        id: r.id,
-        file: join(workspaceRoot, r.file),
-        symbol: r.symbol ?? null,
-        startLine: r.startLine,
-        endLine: r.endLine,
-        score: r.score,
-        text: r.text,
-      }));
+      const resolved = results.map((r) => resolveResult(r, workspaceRoot));
 
-      const text = resolved
-        .map((r, i) => {
-          const location = `${r.file}:${r.startLine}-${r.endLine}`;
-          const label = r.symbol ? `${r.symbol} (${location})` : location;
-          return `${i + 1}. ${label} — score ${r.score.toFixed(3)}\n\`\`\`\n${r.text}\n\`\`\``;
-        })
-        .join('\n\n');
+      // Compact by default (signatures only — token-lean); full bodies on
+      // request. structuredContent always carries the full text so non-LLM UI
+      // clients (the search panel) render code cards regardless of `detail`.
+      const text = (detail ?? 'compact') === 'full' ? renderFull(resolved) : renderCompact(resolved);
 
       // `content` is what an LLM reads; `structuredContent` is the same result
       // set as machine-readable JSON for non-LLM UI clients.
       return { content: [{ type: 'text', text }], structuredContent: { results: resolved } };
     },
   );
+}
+
+interface ResolvedResult {
+  id: string;
+  file: string;
+  symbol: string | null;
+  startLine: number;
+  endLine: number;
+  score: number;
+  text: string;
+}
+
+// Resolve a stored (workspace-relative) result to an absolute-path result the
+// caller can open directly.
+function resolveResult(
+  r: { id: string; file: string; symbol?: string; startLine: number; endLine: number; score: number; text: string },
+  workspaceRoot: string,
+): ResolvedResult {
+  return {
+    id: r.id,
+    file: join(workspaceRoot, r.file),
+    symbol: r.symbol ?? null,
+    startLine: r.startLine,
+    endLine: r.endLine,
+    score: r.score,
+    text: r.text,
+  };
+}
+
+function label(r: ResolvedResult): string {
+  const location = `${r.file}:${r.startLine}-${r.endLine}`;
+  return r.symbol ? `${r.symbol} (${location})` : location;
+}
+
+// One-line signature: the first non-empty line of the chunk (usually the
+// declaration), trimmed and length-capped, with an ellipsis when a body
+// follows — enough to recognise the symbol without emitting its whole body.
+function signatureOf(text: string): string {
+  const nonEmpty = text.replace(/\r/g, '').split('\n').filter((l) => l.trim() !== '');
+  const first = nonEmpty[0]?.trim() ?? '';
+  const clipped = first.length > 200 ? `${first.slice(0, 197)}…` : first;
+  return nonEmpty.length > 1 ? `${clipped} …` : clipped;
+}
+
+// Token-lean listing: number, symbol/location, score, one-line signature.
+function renderCompact(resolved: ResolvedResult[]): string {
+  const body = resolved
+    .map((r, i) => `${i + 1}. ${label(r)} — score ${r.score.toFixed(3)}\n    ${signatureOf(r.text)}`)
+    .join('\n\n');
+  return (
+    `${body}\n\n` +
+    'Signatures only. For a hit\'s full code, call semantic_search again with ' +
+    'expand=[n,...] (no query needed) or open the file at its line range.'
+  );
+}
+
+// Full listing: each result's complete code body in a fenced block. `withScore`
+// is false for expand-on-request, where the results were picked explicitly and
+// carry no meaningful ranking score.
+function renderFull(resolved: ResolvedResult[], withScore = true): string {
+  return resolved
+    .map((r, i) => {
+      const head = withScore ? `${i + 1}. ${label(r)} — score ${r.score.toFixed(3)}` : `${i + 1}. ${label(r)}`;
+      return `${head}\n\`\`\`\n${r.text}\n\`\`\``;
+    })
+    .join('\n\n');
 }

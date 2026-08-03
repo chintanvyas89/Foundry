@@ -122,6 +122,13 @@ i.e. it won't regress a natural-language query. FTS5 is optional (search falls
 back to vector-only if the local sqlite lacks it) and needs no re-embedding — a
 one-time lexical backfill reuses the text already indexed.
 
+It is also **token-lean by default**: results come back as compact signatures
+(symbol + `file:line` range + score + one-line signature), so an agent can pick
+the right hit without pulling whole function bodies into context. To read a hit's
+full code, call again with `expand=[n,…]` (the result numbers — no need to repeat
+the query), or pass `detail="full"` for every body at once. UI clients still
+receive full code via `structuredContent`.
+
 These spawn the server in **query-only** mode (reads the index, never builds or
 modifies it), so they coexist with the Copilot-driven server on the same
 `index.db`.

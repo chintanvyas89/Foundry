@@ -49,6 +49,16 @@ name lookup, ranked exact > prefix > substring) instead of semantic_search, whic
 is weaker at exact names. Use semantic_search when you know *what the code does*
 but not what it's called; use search_symbol when you know the name.
 
+## Reading results efficiently
+
+`semantic_search` returns **compact signatures by default** — each hit is a
+symbol, `file:line` range, score, and one-line signature, not the whole function.
+Triage from these: they're usually enough to know which hit you want. When you
+need a hit's actual code, do NOT re-read the file blindly — call semantic_search
+again with `expand=[n,…]` using the result NUMBERS (no need to repeat the query);
+it returns just those full bodies. Use `detail="full"` only when you genuinely
+need every result's body. This keeps context small.
+
 ## Drilling down
 
 If the first results are close but not exact, don't give up or start reading

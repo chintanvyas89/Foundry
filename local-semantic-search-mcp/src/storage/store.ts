@@ -126,6 +126,43 @@ export class VectorStore {
     return rows.map((row) => blobToVector(row.embedding));
   }
 
+  // Full chunk rows for the given ids, returned IN THE REQUESTED ORDER (missing
+  // ids skipped). Powers expand-on-request: fetch the full body of specific
+  // prior results by id without re-running a search. `score` is a placeholder
+  // (0) — these come from an explicit pick, not a ranking.
+  getChunksByIds(ids: string[]): SearchResult[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT id, file, symbol, startLine, endLine, text, contentHash
+           FROM chunks WHERE id IN (${placeholders})`,
+      )
+      .all(...ids) as Array<{
+      id: string;
+      file: string;
+      symbol: string | null;
+      startLine: number;
+      endLine: number;
+      text: string;
+      contentHash: string;
+    }>;
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return ids
+      .map((id) => byId.get(id))
+      .filter((r): r is NonNullable<typeof r> => r !== undefined)
+      .map((r) => ({
+        id: r.id,
+        file: r.file,
+        symbol: r.symbol ?? undefined,
+        startLine: r.startLine,
+        endLine: r.endLine,
+        text: r.text,
+        contentHash: r.contentHash,
+        score: 0,
+      }));
+  }
+
   getFileHash(file: string): string | null {
     const row = this.db.prepare('SELECT fileHash FROM files WHERE path = ?').get(file) as
       | { fileHash: string }
