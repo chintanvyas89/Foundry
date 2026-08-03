@@ -22,6 +22,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Call graph / execution flow (on-demand)**: callers/callees via the language server, exposed as a panel **Calls** action and a **`trace_calls`** MCP tool — `lsp-bridge-extension/src/callHierarchy.ts`, `local-semantic-search-mcp/src/tools/traceCalls.ts`, `src/chunking/lspBridgeClient.ts`
 - **Symbol-name search**: `search_symbol` MCP tool + panel "Symbol name" toggle — exact/prefix/substring lookup over indexed symbols; the exact-identifier complement to embedding search — `local-semantic-search-mcp/src/tools/searchSymbol.ts`, `store.searchSymbols`
 - **Usages / implementations (on-demand)**: `find_usages` + `find_implementations` MCP tools and a panel **Uses** button — references/implementations via the language server — `lsp-bridge-extension/src/references.ts`, `local-semantic-search-mcp/src/tools/symbolRefs.ts`
+- **Hybrid retrieval (FTS5 + embeddings)**: `semantic_search` fuses vector ranking with a bounded FTS5 lexical bonus, so exact identifiers/tokens the embedding misses still surface — without regressing natural-language queries. Transparent to callers; no new tool, no re-embed (a one-time FTS text backfill reuses stored chunk text) — `src/storage/store.ts` (`searchHybrid`/`searchText`/`backfillFts`), `src/tools/semanticSearch.ts`
 
 **Beyond the original vision** (built, though not in the 16 phases)
 - Relevance feedback: `pins` / `note` / `mode` (refine/expand), incl. **pin-by-result-number** so the LLM can steer without exposing chunk ids — `src/tools/semanticSearch.ts`
@@ -36,13 +37,13 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Repo metadata (Ph1):** `files(path, fileHash)` only — no `repositories` table, language/size/mtime columns, or language detection.
 - **LSP symbols (Ph2):** fetched via the bridge for *chunk boundaries* only — not persisted or queryable — `lsp-bridge-extension/src/symbolProvider.ts`, `src/chunking/lspBridgeClient.ts`.
 - **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
-- **Retrieval / context expansion (Ph10/12):** embedding search + vector-blend relevance feedback; no intent detection, FTS, graph traversal, or structural (caller/callee/test) expansion.
-- **MCP tools (Ph13):** 5 of 12 (`semantic_search`, `search_symbol`, `trace_calls`, `find_usages`, `find_implementations`).
+- **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback; no intent detection, graph traversal, or structural (caller/callee/test) expansion.
+- **MCP tools (Ph13):** 5 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `find_usages`, `find_implementations`).
 - **Tree-sitter (Ph14):** chunking only; no import/symbol/relationship extraction.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
 
 ## Not started ⬜
-Symbol relationships/edges (Ph3), API graph (Ph6), DB graph (Ph7), FTS5 (Ph8), architecture summaries (Ph9), lazy indexing (Ph11), visualizations (Ph15).
+Symbol relationships/edges (Ph3), API graph (Ph6), DB graph (Ph7), architecture summaries (Ph9), lazy indexing (Ph11), visualizations (Ph15).
 
 ## Next up (prioritized)
 
@@ -65,10 +66,21 @@ pipe (`src/chunking/lspBridgeClient.ts` → `getCallHierarchyViaBridge`,
 a dedicated persisted `symbols`/`edges` table for whole-repo relationship queries
 (current impl reuses `chunks.symbol` for names and resolves usages on-demand).
 
-### 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10) — recommended next
-Add SQLite FTS5 and blend exact-match → FTS → embeddings, fixing the exact-identifier weakness of pure semantic search.
+### ✅ 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10) — shipped
+`semantic_search` now fuses semantic (cosine) ranking with a **bounded FTS5
+lexical bonus** (`src/storage/store.ts` → `searchHybrid`/`searchText`), fixing the
+exact-identifier weakness of pure vector search. The bonus is capped so a clearly
+stronger semantic hit is never dethroned — lexical evidence only decides among
+near-ties — so it can't regress a natural-language query pure vector got right.
+FTS5 is optional at runtime (degrades to vector-only if the sqlite build lacks
+it) and is kept in sync from the write path; a one-time `backfillFts` populates it
+from existing chunk text with **no re-embed**.
+- **Still open:** FTS5's word tokenizer doesn't split `camelCase`/`snake_case`,
+  so a two-word NL query won't lexically match a single-token identifier (handled
+  today by the semantic arm + `search_symbol`). A future index-time identifier
+  split would close this — it needs only an FTS rebuild, still no re-embed.
 
-### 4. Token efficiency (Ph12 + compact output)
+### 4. Token efficiency (Ph12 + compact output) — recommended next
 Signatures-first results with expand-on-request; structural context expansion (symbol + parent/callers/tests) instead of raw chunks.
 
 ### 5. Later bets

@@ -124,6 +124,21 @@ async function main() {
         `(${embedded} embedded this run, ${skippedFiles} files unchanged & skipped, ${prunedFiles} stale files pruned)`,
     );
 
+    // Populate the FTS5 lexical index for hybrid search. buildFull only writes
+    // FTS rows for files it (re)embedded this run, so an index built before FTS
+    // existed — or one where unchanged files were skipped — needs a one-time
+    // backfill. No-op once the counts line up.
+    if (store.ftsAvailable()) {
+      const backfilled = store.backfillFts();
+      console.error(
+        backfilled > 0
+          ? `[swe-search] hybrid search: FTS5 lexical index backfilled (${backfilled} chunks)`
+          : '[swe-search] hybrid search: FTS5 lexical index active',
+      );
+    } else {
+      console.error('[swe-search] hybrid search: FTS5 unavailable in this sqlite — vector-only');
+    }
+
     startWatcher(workspaceRoot, indexer, config.exclude);
     console.error('[swe-search] incremental watch active');
   })();

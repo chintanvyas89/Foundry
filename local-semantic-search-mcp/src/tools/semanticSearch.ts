@@ -108,7 +108,12 @@ export function registerSemanticSearchTool(
       const direction = components.length === 1 ? queryEmbedding : blend(components);
 
       const k = topK ?? config.topKDefault * tuning.topKFactor;
-      let results = store.search(direction, k);
+      // Hybrid retrieval: the blended vector drives semantic ranking while the
+      // raw query text (plus any note) drives the lexical/FTS arm, so exact
+      // identifiers the embedding misses still surface. Degrades to pure vector
+      // search when FTS5 is unavailable.
+      const textQuery = note && note.trim() ? `${query} ${note}` : query;
+      let results = store.searchHybrid(direction, textQuery, k);
       if (tuning.minScore > 0) {
         results = results.filter((r) => r.score >= tuning.minScore);
       }

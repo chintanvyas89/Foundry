@@ -29,6 +29,23 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
+// Separate from SCHEMA because FTS5 is a compile-time SQLite option: not every
+// build ships it. We create it in a try/catch and fall back to pure vector
+// search if it's missing, so the server still runs on a locked-down box whose
+// sqlite lacks FTS5. `id`/`file` are UNINDEXED (stored but not tokenized) so we
+// can join back to `chunks` and delete a file's rows; `symbol`/`text` are the
+// searchable columns. Kept in sync manually from the write path (no external
+// triggers) — simpler and portable.
+const FTS_SCHEMA = `
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+  id UNINDEXED,
+  file UNINDEXED,
+  symbol,
+  text,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+`;
+
 // Paths in `chunks.file` / `chunks.id` / `files.path` are stored RELATIVE to
 // the workspace root (forward-slash separated). That keeps the index portable
 // between machines/checkouts, so it can be shared without every dev re-indexing.
@@ -39,6 +56,9 @@ CREATE TABLE IF NOT EXISTS meta (
 // revisit only if sqlite-vec becomes warranted.
 export class VectorStore {
   private db: DatabaseSync;
+  // Whether the FTS5 lexical index is usable. False if this sqlite build lacks
+  // FTS5; the store then transparently degrades to pure vector search.
+  private ftsEnabled = false;
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
@@ -50,10 +70,27 @@ export class VectorStore {
     // to retry instead of throwing SQLITE_BUSY straight to the caller.
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
     this.db.exec(SCHEMA);
+    try {
+      this.db.exec(FTS_SCHEMA);
+      this.ftsEnabled = true;
+    } catch {
+      // No FTS5 in this sqlite build — searchText returns nothing and
+      // searchHybrid behaves exactly like pure vector search.
+      this.ftsEnabled = false;
+    }
+  }
+
+  // Whether hybrid (vector + lexical) retrieval is active. False means this
+  // sqlite build has no FTS5, so search is vector-only.
+  ftsAvailable(): boolean {
+    return this.ftsEnabled;
   }
 
   deleteByFile(file: string): void {
     this.db.prepare('DELETE FROM chunks WHERE file = ?').run(file);
+    if (this.ftsEnabled) {
+      this.db.prepare('DELETE FROM chunks_fts WHERE file = ?').run(file);
+    }
   }
 
   countByFile(file: string): number {
@@ -129,6 +166,7 @@ export class VectorStore {
       (this.db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c > 0;
     if (hadData) {
       this.db.exec('DELETE FROM chunks; DELETE FROM files;');
+      if (this.ftsEnabled) this.db.exec('DELETE FROM chunks_fts;');
     }
     this.setMeta('model', model);
     this.setMeta('dtype', dtype);
@@ -156,6 +194,15 @@ export class VectorStore {
       INSERT OR REPLACE INTO chunks (id, file, symbol, startLine, endLine, text, contentHash, embedding)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    // FTS5 has no UPSERT, so mirror INSERT OR REPLACE as delete-then-insert on
+    // the same id, inside the same transaction as the chunk write so the two
+    // stay consistent.
+    const ftsDel = this.ftsEnabled
+      ? this.db.prepare('DELETE FROM chunks_fts WHERE id = ?')
+      : null;
+    const ftsIns = this.ftsEnabled
+      ? this.db.prepare('INSERT INTO chunks_fts (id, file, symbol, text) VALUES (?, ?, ?, ?)')
+      : null;
     // One transaction for the whole batch — SQLite autocommits per statement
     // otherwise, which means an fsync per chunk and dramatically slower writes
     // during a full index build.
@@ -172,12 +219,39 @@ export class VectorStore {
           c.contentHash,
           Buffer.from(c.embedding.buffer, c.embedding.byteOffset, c.embedding.byteLength),
         );
+        if (ftsDel && ftsIns) {
+          ftsDel.run(c.id);
+          ftsIns.run(c.id, c.file, c.symbol ?? null, c.text);
+        }
       }
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  // Rebuild the FTS index from `chunks` if it's out of sync (e.g. an index
+  // built before FTS existed, where the virtual table is empty). Cheap no-op
+  // when the row counts already match. Only the process holding the index lock
+  // (the writer) should call this; a read-only query process leaves it alone.
+  backfillFts(): number {
+    if (!this.ftsEnabled) return 0;
+    const cChunks = (this.db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c;
+    const cFts = (this.db.prepare('SELECT COUNT(*) AS c FROM chunks_fts').get() as { c: number }).c;
+    if (cChunks === cFts) return 0;
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM chunks_fts');
+      this.db.exec(
+        'INSERT INTO chunks_fts (id, file, symbol, text) SELECT id, file, symbol, text FROM chunks',
+      );
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return cChunks;
   }
 
   search(queryEmbedding: Float32Array, topK: number): SearchResult[] {
@@ -205,6 +279,89 @@ export class VectorStore {
 
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, topK);
+  }
+
+  // Lexical (keyword) search over the FTS5 index, ranked by bm25 (best first).
+  // Complements vector search on exact identifiers/tokens, which embeddings are
+  // weak at. Returns [] if FTS5 is unavailable or the query has no usable terms.
+  // The `score` field carries the raw bm25 value (lower = better); callers that
+  // fuse with vector results use the RANK, not this magnitude.
+  searchText(queryText: string, cap = 50): SearchResult[] {
+    if (!this.ftsEnabled) return [];
+    const match = toFtsMatch(queryText);
+    if (!match) return [];
+    let rows: Array<{
+      id: string;
+      file: string;
+      symbol: string | null;
+      startLine: number;
+      endLine: number;
+      text: string;
+      contentHash: string;
+      bm: number;
+    }>;
+    try {
+      rows = this.db
+        .prepare(
+          `SELECT c.id, c.file, c.symbol, c.startLine, c.endLine, c.text, c.contentHash,
+                  bm25(chunks_fts) AS bm
+             FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.id
+            WHERE chunks_fts MATCH ?
+            ORDER BY bm
+            LIMIT ?`,
+        )
+        .all(match, cap) as typeof rows;
+    } catch {
+      // A malformed MATCH expression shouldn't take down a search — just skip
+      // the lexical arm for this query.
+      return [];
+    }
+    return rows.map((row) => ({
+      id: row.id,
+      file: row.file,
+      symbol: row.symbol ?? undefined,
+      startLine: row.startLine,
+      endLine: row.endLine,
+      text: row.text,
+      contentHash: row.contentHash,
+      score: row.bm,
+    }));
+  }
+
+  // Hybrid retrieval: semantic ranking (cosine) with a BOUNDED lexical bonus.
+  //
+  // We deliberately don't use rank-fusion (RRF) here. RRF lets a strong lexical
+  // hit dethrone a strong semantic #1, which regresses natural-language queries
+  // — made worse by FTS5's word tokenizer, which indexes `cosineSimilarity` as
+  // one token but matches the two-word phrase "cosine similarity" only in prose
+  // (docs/comments), not the actual identifier. So a NL query would surface docs
+  // over code.
+  //
+  // Instead each result's cosine score gets a small additive bonus (decaying
+  // with FTS rank, capped at LEX_BONUS). Because the bonus is bounded, a clearly
+  // stronger semantic hit can never be overtaken; lexical evidence only decides
+  // among results whose semantic scores are already close — which is exactly
+  // when we want it to. This can't regress a query that pure vector got right;
+  // it only promotes exact-token matches within the semantic candidate pool.
+  //
+  // Returns `score` = cosine + bonus so display order matches the number shown.
+  // Degrades to pure vector search when FTS is unavailable. Note: it reorders /
+  // promotes within the vector candidate pool but doesn't inject lexical-only
+  // hits the vector arm missed entirely — a blind promotion of those (unknown
+  // true relevance) is what caused the regressions we're avoiding.
+  searchHybrid(direction: Float32Array, queryText: string, topK: number): SearchResult[] {
+    const LEX_BONUS = 0.1; // max additive bump for the top lexical hit
+    const pool = this.search(direction, Math.max(topK * 8, 64));
+
+    const fts = this.searchText(queryText, Math.max(topK * 4, 50));
+    const bonusById = new Map<string, number>();
+    // Decay by rank so the strongest lexical hits get the most help: rank 0 ->
+    // LEX_BONUS, rank 1 -> LEX_BONUS/2, ...
+    fts.forEach((r, i) => bonusById.set(r.id, LEX_BONUS / (1 + i)));
+
+    const fused = pool.map((r) => ({ ...r, score: r.score + (bonusById.get(r.id) ?? 0) }));
+    fused.sort((a, b) => b.score - a.score);
+    return fused.slice(0, topK);
   }
 
   // Name-based symbol lookup over the already-indexed chunks (which carry a
@@ -236,6 +393,33 @@ export class VectorStore {
   close(): void {
     this.db.close();
   }
+}
+
+// Common English/question function words carry no lexical signal for code
+// search but, OR'd into the MATCH, would let bm25 reward chunks that merely
+// repeat them — dethroning the true answer on natural-language queries. Dropped
+// so the lexical arm matches on the meaningful terms only.
+const FTS_STOPWORDS = new Set([
+  'the', 'a', 'an', 'of', 'to', 'in', 'on', 'at', 'by', 'for', 'and', 'or',
+  'is', 'are', 'was', 'were', 'be', 'been', 'do', 'does', 'did', 'has', 'have',
+  'this', 'that', 'these', 'those', 'it', 'its', 'as', 'with', 'from', 'into',
+  'where', 'what', 'which', 'who', 'whom', 'how', 'why', 'when',
+]);
+
+// Turn a free-text query into a safe FTS5 MATCH expression. User queries
+// contain punctuation ("where's the cache?") and FTS operators that would be a
+// syntax error or mean something unintended, so we extract bare word/identifier
+// tokens and OR them as quoted single-token phrases. OR (not the FTS default
+// AND) maximises lexical recall — RRF then ranks; a chunk matching more terms
+// naturally scores better on bm25. Stopwords are removed first. Returns null
+// when nothing usable remains (e.g. an all-stopword query) so the caller falls
+// back to pure vector search.
+function toFtsMatch(text: string): string | null {
+  const tokens = (text.match(/[A-Za-z0-9_]+/g) ?? [])
+    .filter((t) => t.length >= 2 && !FTS_STOPWORDS.has(t.toLowerCase()))
+    .slice(0, 32);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t}"`).join(' OR ');
 }
 
 function blobToVector(blob: Uint8Array): Float32Array {

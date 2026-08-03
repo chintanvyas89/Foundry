@@ -115,6 +115,13 @@ identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
 dispatch, cross-language calls, or data flow.
 
+`semantic_search` uses **hybrid retrieval**: semantic (vector) ranking with a
+bounded full-text (FTS5) bonus, so exact identifiers/tokens the embedding misses
+still surface — capped so it never dethrones a clearly better semantic match,
+i.e. it won't regress a natural-language query. FTS5 is optional (search falls
+back to vector-only if the local sqlite lacks it) and needs no re-embedding — a
+one-time lexical backfill reuses the text already indexed.
+
 These spawn the server in **query-only** mode (reads the index, never builds or
 modifies it), so they coexist with the Copilot-driven server on the same
 `index.db`.
