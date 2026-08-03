@@ -22,7 +22,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Call graph / execution flow (on-demand)**: callers/callees via the language server, exposed as a panel **Calls** action and a **`trace_calls`** MCP tool — `lsp-bridge-extension/src/callHierarchy.ts`, `local-semantic-search-mcp/src/tools/traceCalls.ts`, `src/chunking/lspBridgeClient.ts`
 - **Symbol-name search**: `search_symbol` MCP tool + panel "Symbol name" toggle — exact/prefix/substring lookup over indexed symbols; the exact-identifier complement to embedding search — `local-semantic-search-mcp/src/tools/searchSymbol.ts`, `store.searchSymbols`
 - **Usages / implementations (on-demand)**: `find_usages` + `find_implementations` MCP tools and a panel **Uses** button — references/implementations via the language server — `lsp-bridge-extension/src/references.ts`, `local-semantic-search-mcp/src/tools/symbolRefs.ts`
-- **Hybrid retrieval (FTS5 + embeddings)**: `semantic_search` fuses vector ranking with a bounded FTS5 lexical bonus, so exact identifiers/tokens the embedding misses still surface — without regressing natural-language queries. Transparent to callers; no new tool, no re-embed (a one-time FTS text backfill reuses stored chunk text) — `src/storage/store.ts` (`searchHybrid`/`searchText`/`backfillFts`), `src/tools/semanticSearch.ts`
+- **Hybrid retrieval (FTS5 + embeddings)**: `semantic_search` fuses vector ranking with a bounded FTS5 lexical bonus, so exact identifiers/tokens the embedding misses still surface — without regressing natural-language queries. Identifiers are **split at index + query time** (`cosineSimilarity` ↔ "cosine similarity", `get_user_by_id` ↔ "user id") so word-level queries match compound names. Transparent to callers; no new tool, no re-embed (a one-time FTS text backfill/upgrade reuses stored chunk text, version-gated) — `src/storage/store.ts` (`searchHybrid`/`searchText`/`backfillFts`/`ftsAugment`), `src/tools/semanticSearch.ts`
 - **Token-lean output**: `semantic_search` returns compact signatures (symbol + file:line + score + one-line signature) by default; `expand=[n,…]` pulls full bodies of chosen prior hits without re-querying, and `detail="full"` returns all bodies. Full text still goes to UI clients via `structuredContent` — `src/tools/semanticSearch.ts`, `store.getChunksByIds`
 
 **Beyond the original vision** (built, though not in the 16 phases)
@@ -76,10 +76,11 @@ near-ties — so it can't regress a natural-language query pure vector got right
 FTS5 is optional at runtime (degrades to vector-only if the sqlite build lacks
 it) and is kept in sync from the write path; a one-time `backfillFts` populates it
 from existing chunk text with **no re-embed**.
-- **Still open:** FTS5's word tokenizer doesn't split `camelCase`/`snake_case`,
-  so a two-word NL query won't lexically match a single-token identifier (handled
-  today by the semantic arm + `search_symbol`). A future index-time identifier
-  split would close this — it needs only an FTS rebuild, still no re-embed.
+- **Identifier splitting:** `ftsAugment` splits `camelCase`/`snake_case`/`kebab`
+  names into their sub-words at index time (and `toFtsMatch` at query time), so a
+  word-level query matches a single-token identifier (`cosineSimilarity` ↔ "cosine
+  similarity"). The FTS content is version-stamped (`fts_version`); a stale index
+  rebuilds its lexical rows once on the next writer start — still no re-embed.
 
 ### ✅ 4. Token efficiency (Ph12 + compact output) — shipped (partial)
 `semantic_search` is **compact by default** (`src/tools/semanticSearch.ts` →

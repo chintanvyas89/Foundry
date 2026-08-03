@@ -59,6 +59,9 @@ export class VectorStore {
   // Whether the FTS5 lexical index is usable. False if this sqlite build lacks
   // FTS5; the store then transparently degrades to pure vector search.
   private ftsEnabled = false;
+  // Set once we've stamped the current FTS content version this process, so we
+  // don't re-write the meta row on every upsert batch.
+  private ftsStamped = false;
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
@@ -240,6 +243,12 @@ export class VectorStore {
     const ftsIns = this.ftsEnabled
       ? this.db.prepare('INSERT INTO chunks_fts (id, file, symbol, text) VALUES (?, ?, ?, ?)')
       : null;
+    // These rows are written in the current FTS content format; stamp the
+    // version once so backfillFts doesn't think the index is stale.
+    if (this.ftsEnabled && !this.ftsStamped) {
+      this.setMeta('fts_version', FTS_VERSION);
+      this.ftsStamped = true;
+    }
     // One transaction for the whole batch — SQLite autocommits per statement
     // otherwise, which means an fsync per chunk and dramatically slower writes
     // during a full index build.
@@ -258,7 +267,7 @@ export class VectorStore {
         );
         if (ftsDel && ftsIns) {
           ftsDel.run(c.id);
-          ftsIns.run(c.id, c.file, c.symbol ?? null, c.text);
+          ftsIns.run(c.id, c.file, ftsAugment(c.symbol ?? ''), ftsAugment(c.text));
         }
       }
       this.db.exec('COMMIT');
@@ -268,26 +277,40 @@ export class VectorStore {
     }
   }
 
-  // Rebuild the FTS index from `chunks` if it's out of sync (e.g. an index
-  // built before FTS existed, where the virtual table is empty). Cheap no-op
-  // when the row counts already match. Only the process holding the index lock
-  // (the writer) should call this; a read-only query process leaves it alone.
+  // Rebuild the FTS index from `chunks` when it's out of sync — either the row
+  // counts differ (e.g. an index built before FTS existed, where the virtual
+  // table is empty) or the stored FTS content version is stale (an older token
+  // format, e.g. before identifier splitting). Reads only text already in
+  // `chunks`, so it's a lexical re-index with NO re-embed. Cheap no-op when the
+  // index is already current. Only the process holding the index lock (the
+  // writer) should call this; a read-only query process leaves it alone.
   backfillFts(): number {
     if (!this.ftsEnabled) return 0;
+    const versionOk = this.getMeta('fts_version') === FTS_VERSION;
     const cChunks = (this.db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c;
     const cFts = (this.db.prepare('SELECT COUNT(*) AS c FROM chunks_fts').get() as { c: number }).c;
-    if (cChunks === cFts) return 0;
+    if (versionOk && cChunks === cFts) return 0;
+
+    const rows = this.db.prepare('SELECT id, file, symbol, text FROM chunks').all() as Array<{
+      id: string;
+      file: string;
+      symbol: string | null;
+      text: string;
+    }>;
+    const ins = this.db.prepare('INSERT INTO chunks_fts (id, file, symbol, text) VALUES (?, ?, ?, ?)');
     this.db.exec('BEGIN');
     try {
       this.db.exec('DELETE FROM chunks_fts');
-      this.db.exec(
-        'INSERT INTO chunks_fts (id, file, symbol, text) SELECT id, file, symbol, text FROM chunks',
-      );
+      for (const r of rows) {
+        ins.run(r.id, r.file, ftsAugment(r.symbol ?? ''), ftsAugment(r.text));
+      }
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
+    this.setMeta('fts_version', FTS_VERSION);
+    this.ftsStamped = true;
     return cChunks;
   }
 
@@ -443,6 +466,37 @@ const FTS_STOPWORDS = new Set([
   'where', 'what', 'which', 'who', 'whom', 'how', 'why', 'when',
 ]);
 
+// Bumped whenever the FTS *content* format changes (e.g. adding split-identifier
+// tokens). A stored index whose stamp differs is rebuilt from existing chunk
+// text on the next writer start — no re-embed, just a lexical re-index.
+const FTS_VERSION = '2';
+
+// Split a camelCase / snake_case / kebab-case identifier into its sub-words.
+// FTS5's word tokenizer treats `getUserById` as ONE token, so a two-word query
+// ("user by id") never matches it. Emitting the sub-words at index (and query)
+// time fixes that. Returns [] when the token isn't a compound identifier.
+function splitIdentifier(token: string): string[] {
+  const spaced = token
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  if (spaced === token) return [];
+  return spaced.split(/\s+/).filter((w) => w.length > 0);
+}
+
+// Augment text for the FTS index: the original text plus the sub-words of any
+// compound identifiers in it, so both `cosineSimilarity` and the phrase "cosine
+// similarity" match the same chunk. Only the extra split-words are appended (the
+// originals are already present), deduped to keep the addition small.
+function ftsAugment(text: string): string {
+  const words = text.match(/[A-Za-z0-9]+/g) ?? [];
+  const extra = new Set<string>();
+  for (const w of words) {
+    for (const part of splitIdentifier(w)) extra.add(part.toLowerCase());
+  }
+  return extra.size > 0 ? `${text} ${[...extra].join(' ')}` : text;
+}
+
 // Turn a free-text query into a safe FTS5 MATCH expression. User queries
 // contain punctuation ("where's the cache?") and FTS operators that would be a
 // syntax error or mean something unintended, so we extract bare word/identifier
@@ -452,9 +506,19 @@ const FTS_STOPWORDS = new Set([
 // when nothing usable remains (e.g. an all-stopword query) so the caller falls
 // back to pure vector search.
 function toFtsMatch(text: string): string | null {
-  const tokens = (text.match(/[A-Za-z0-9_]+/g) ?? [])
-    .filter((t) => t.length >= 2 && !FTS_STOPWORDS.has(t.toLowerCase()))
-    .slice(0, 32);
+  const raw = (text.match(/[A-Za-z0-9_]+/g) ?? []).filter(
+    (t) => t.length >= 2 && !FTS_STOPWORDS.has(t.toLowerCase()),
+  );
+  // Include each token AND its identifier sub-words, so a camelCase query term
+  // matches the split tokens now stored in the index (and vice-versa).
+  const set = new Set<string>();
+  for (const t of raw) {
+    set.add(t);
+    for (const part of splitIdentifier(t)) {
+      if (part.length >= 2 && !FTS_STOPWORDS.has(part.toLowerCase())) set.add(part);
+    }
+  }
+  const tokens = [...set].slice(0, 48);
   if (tokens.length === 0) return null;
   return tokens.map((t) => `"${t}"`).join(' OR ');
 }

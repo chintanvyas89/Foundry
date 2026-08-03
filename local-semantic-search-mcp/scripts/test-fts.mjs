@@ -45,6 +45,13 @@ const fts = store.searchText('computeCosineSimilarity', 10);
 assert(fts.length >= 1 && fts[0].id === 'target', 'FTS finds exact identifier as top hit');
 assert(store.searchText('nonexistenttoken12345', 10).length === 0, 'FTS returns nothing for absent token');
 
+// 2b. camelCase splitting: a two-word query matches the single-token identifier
+//     `computeCosineSimilarity` (previously it would not).
+assert(
+  store.searchText('cosine similarity', 10).some((r) => r.id === 'target'),
+  'FTS matches a camelCase identifier from a two-word query (split)',
+);
+
 // 3. Hybrid: the +0.1 bonus lifts target (0.86) above near (0.94)? No — gap 0.08
 //    < 0.1 so it DOES overtake near; but NOT strong (0.98, gap 0.12 > 0.1).
 const hyb = store.searchHybrid(direction, 'computeCosineSimilarity', 3);
@@ -55,8 +62,17 @@ assert(hyb[1].id === 'target', 'bounded bonus promotes the exact-identifier hit 
 const nl = store.searchHybrid(direction, "where's the cosine similarity helper?", 3);
 assert(Array.isArray(nl) && nl.length > 0, 'punctuated NL query returns results (no MATCH syntax error)');
 
-// 5. backfillFts is a no-op when in sync.
-assert(store.backfillFts() === 0, 'backfillFts is a no-op when counts match');
+// 4b. snake_case identifier: separate words match it.
+store.upsertChunks([
+  chunk('snakey', 'get_user_by_id', 'function get_user_by_id() { return 1; }', v(1, 0.05)),
+]);
+assert(
+  store.searchText('user id', 10).some((r) => r.id === 'snakey'),
+  'FTS matches a snake_case identifier from separate words',
+);
+
+// 5. backfillFts is a no-op when in sync (current version + counts match).
+assert(store.backfillFts() === 0, 'backfillFts is a no-op when in sync');
 
 // 6. deleteByFile also clears the FTS row.
 store.deleteByFile('src/target.ts');
