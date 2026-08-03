@@ -80,10 +80,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.3.3.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.3.3.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.4.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.4.0.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.3.3.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.4.0.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -102,7 +102,14 @@ absolute node path if VS Code can't find `node`). Then:
   iterative search: **pin** any result to steer the next query, add a **note**,
   then **Refine** (narrow to high-confidence hits) or **Expand** (broaden). Pins
   reuse the result's stored vector, so refining costs no extra embedding — it's
-  relevance feedback, still with no LLM.
+  relevance feedback, still with no LLM. Each result also has a **Calls** button
+  that traces its callers/callees (call graph / execution flow) via the language
+  server — click through to walk the flow.
+
+For Copilot: alongside `semantic_search`, a **`trace_calls`** MCP tool exposes the
+same call graph to the agent (pass a result's `file`/`line`) so it can follow
+execution flow instead of reading files. Call graph needs the extension running
+and can't resolve dynamic dispatch, cross-language calls, or data flow.
 
 These spawn the server in **query-only** mode (reads the index, never builds or
 modifies it), so they coexist with the Copilot-driven server on the same

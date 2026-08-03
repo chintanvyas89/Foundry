@@ -1,0 +1,1076 @@
+# Foundry — status & roadmap
+
+_Last updated: 2026-08-03_
+
+Foundry today is a **local, offline semantic code search** system for VS Code: an
+MCP server that indexes a repo into embeddings (in-process ONNX, SQLite) and
+answers a `semantic_search` tool, plus a VS Code extension that adds a no-LLM
+search UI and an LSP symbol bridge. It works both with Copilot agent mode and
+standalone (no LLM, no network). This doc reconciles what's actually built with
+the full "code intelligence platform" vision (preserved verbatim in the
+appendix), and lays out what to build next.
+
+Status legend: ✅ done · 🟡 partial · ⬜ not started.
+
+## Implemented ✅
+
+**Core search**
+- MCP server + `semantic_search` tool over stdio — `local-semantic-search-mcp/src/index.ts`, `src/tools/semanticSearch.ts`
+- In-process ONNX embeddings (embeddinggemma-300m, q8); SQLite vector store (`chunks`/`files`/`meta`); brute-force cosine — `src/embedding/embedder.ts`, `src/storage/store.ts`, `src/storage/similarity.ts`
+- Incremental content-hash indexing + chokidar watcher (skips unchanged files, reuses chunk embeddings) — `src/indexing/indexer.ts`, `src/indexing/watcher.ts`
+- Three-tier chunking: LSP bridge → tree-sitter → fixed-window — `src/chunking/*`
+- **Call graph / execution flow (on-demand)**: callers/callees via the language server, exposed as a panel **Calls** action and a **`trace_calls`** MCP tool — `lsp-bridge-extension/src/callHierarchy.ts`, `local-semantic-search-mcp/src/tools/traceCalls.ts`, `src/chunking/lspBridgeClient.ts`
+
+**Beyond the original vision** (built, though not in the 16 phases)
+- Relevance feedback: `pins` / `note` / `mode` (refine/expand), incl. **pin-by-result-number** so the LLM can steer without exposing chunk ids — `src/tools/semanticSearch.ts`
+- Portable / shareable index: relative paths + model stamp + startup prune — `src/storage/store.ts`, `src/indexing/indexer.ts`
+- Single-instance lock + WAL so search coexists with indexing; query-only mode — `src/lock.ts`, `src/index.ts`
+- `structuredContent` output for non-LLM clients
+- Config + `.sweignore` excludes — `src/config.ts`, `src/ignore/ignoreMatcher.ts`
+- **No-LLM VS Code search UI**: Search-by-meaning (QuickPick), Find-similar, and a sidebar panel with a context tray, pins, refine/expand, and code-snippet cards — `lsp-bridge-extension/src/searchPanel.ts`, `searchCommands.ts`, `searchClient.ts`
+- LLM drill-down guidance — `.github/copilot-instructions.md`
+
+## Partial 🟡
+- **Repo metadata (Ph1):** `files(path, fileHash)` only — no `repositories` table, language/size/mtime columns, or language detection.
+- **LSP symbols (Ph2):** fetched via the bridge for *chunk boundaries* only — not persisted or queryable — `lsp-bridge-extension/src/symbolProvider.ts`, `src/chunking/lspBridgeClient.ts`.
+- **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
+- **Retrieval / context expansion (Ph10/12):** embedding search + vector-blend relevance feedback; no intent detection, FTS, graph traversal, or structural (caller/callee/test) expansion.
+- **MCP tools (Ph13):** 2 of 12 (`semantic_search`, `trace_calls`).
+- **Tree-sitter (Ph14):** chunking only; no import/symbol/relationship extraction.
+- **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
+
+## Not started ⬜
+Symbol relationships/edges (Ph3), API graph (Ph6), DB graph (Ph7), FTS5 (Ph8), architecture summaries (Ph9), lazy indexing (Ph11), visualizations (Ph15).
+
+## Next up (prioritized)
+
+### ✅ 1. Call graph / execution flow — shipped (on-demand)
+Callers/callees are computed via the language server in
+`lsp-bridge-extension/src/callHierarchy.ts`, exposed two ways: a **Calls** button
+on each panel result, and a **`trace_calls`** MCP tool for Copilot over the bridge
+pipe (`src/chunking/lspBridgeClient.ts` → `getCallHierarchyViaBridge`,
+`local-semantic-search-mcp/src/tools/traceCalls.ts`).
+- **Still open:** persist `symbols` + `call_graph` tables for whole-repo queries
+  (current impl is on-demand, one level per call); a `show_execution_flow`
+  bounded-depth walk as a single tool.
+- **Caveats:** needs the bridge (VS Code + a language server) running — a bare
+  `query.mjs` CLI returns nothing; cannot resolve dynamic dispatch,
+  cross-language, or data flow (semantic search stays the complement).
+
+### 2. Persisted symbol index + tools (Ph2/3)
+`search_symbol`, `find_usages`, `find_implementations` — the foundation the call graph reuses.
+
+### 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10)
+Add SQLite FTS5 and blend exact-match → FTS → embeddings, fixing the exact-identifier weakness of pure semantic search.
+
+### 4. Token efficiency (Ph12 + compact output)
+Signatures-first results with expand-on-request; structural context expansion (symbol + parent/callers/tests) instead of raw chunks.
+
+### 5. Later bets
+Lazy indexing (Ph11), architecture summaries (Ph9), API/DB graphs (Ph6/7), visualizations (Ph15).
+
+## Known limitations
+- No call graph yet (see Next up #1).
+- Semantic search **can't do data flow**, and only *suggests candidates* for dynamic dispatch / cross-language boundaries — verify before trusting an edge.
+- Whether Copilot auto-calls `semantic_search` is the model's choice; `#semantic_search` forces it and `.github/copilot-instructions.md` nudges it.
+
+---
+
+## Appendix: full vision (16 phases)
+
+The original end-to-end roadmap, preserved in full below.
+
+# Code Intelligence Platform - Step-by-Step Implementation Plan (LSP First)
+
+## Vision
+
+Build a local-first, AI-native repository intelligence platform that understands code architecture, execution flow, dependencies, APIs, database usage, and repository relationships.
+
+The system should expose repository intelligence to AI agents through an MCP server while minimizing token usage and maximizing architectural understanding.
+
+---
+
+## Design Principles
+
+1. Local-first architecture.
+2. Language Server Protocol (LSP) as the primary semantic intelligence source.
+3. Tree-sitter as a fallback parser.
+4. Incremental and lazy indexing.
+5. Graph-based repository intelligence.
+6. Hybrid retrieval using symbols, graph traversal, full-text search, and embeddings.
+7. AI-agent-friendly context expansion.
+
+---
+
+## High-Level Architecture
+
+```text
+Repository
+    ↓
+Language Detection
+    ↓
+-------------------------------
+|                             |
+LSP Supported              No LSP
+|                             |
+Language Server             Tree-sitter
+|                             |
+Semantic Information        AST Information
+|                             |
+-------------------------------
+              ↓
+        Repository Indexer
+              ↓
+         Graph Builder
+              ↓
+             SQLite
+              ↓
+      Retrieval Engine
+              ↓
+          MCP Server
+              ↓
+           AI Agents
+```
+
+---
+
+## Phase 1 - Repository Metadata
+
+### Goal
+
+Store repository information and enable incremental indexing.
+
+### Tables
+
+```text
+repositories
+-------------
+id
+name
+path
+branch
+last_indexed
+
+files
+------
+id
+repository_id
+path
+extension
+language
+sha256
+size
+last_modified
+```
+
+### Tasks
+
+* Index repository files.
+* Detect language.
+* Store file metadata.
+* Detect changed files using hashes.
+* Support incremental indexing.
+
+---
+
+## Phase 2 - LSP Integration
+
+### Goal
+
+Use Language Servers as semantic analyzers.
+
+### Supported LSP APIs
+
+```text
+workspace/symbol
+
+textDocument/documentSymbol
+```
+
+### Tasks
+
+Retrieve:
+
+```text
+Classes
+Methods
+Functions
+Interfaces
+Enums
+Structs
+Packages
+Modules
+Variables
+Constants
+```
+
+### Tables
+
+```text
+symbols
+-------
+
+id
+file_id
+name
+type
+signature
+language
+start_line
+end_line
+visibility
+```
+
+### Deliverables
+
+* LSP client.
+* Symbol extraction.
+* Repository symbol indexing.
+
+---
+
+## Phase 3 - Symbol Relationships
+
+### Goal
+
+Understand repository relationships.
+
+### LSP APIs
+
+```text
+textDocument/references
+
+textDocument/definition
+
+textDocument/implementation
+
+textDocument/typeDefinition
+```
+
+### Relationships
+
+```text
+references
+implements
+defines
+inherits
+uses
+depends_on
+```
+
+### Tables
+
+```text
+edges
+------
+
+source_symbol_id
+target_symbol_id
+relationship_type
+```
+
+### Deliverables
+
+Support:
+
+```text
+Show all implementations.
+
+Find usages of a symbol.
+
+Show inheritance hierarchy.
+
+Find symbol definitions.
+```
+
+---
+
+## Phase 4 - Call Graph
+
+### Goal
+
+Build execution flow.
+
+### LSP APIs
+
+```text
+callHierarchy/prepareCallHierarchy
+
+callHierarchy/incomingCalls
+
+callHierarchy/outgoingCalls
+```
+
+### Tables
+
+```text
+call_graph
+-----------
+
+caller_symbol_id
+callee_symbol_id
+```
+
+### Example
+
+```text
+CheckoutAPI
+
+↓
+
+CheckoutService
+
+↓
+
+PaymentService
+
+↓
+
+InventoryService
+
+↓
+
+Database
+```
+
+### Deliverables
+
+Support:
+
+```text
+Who calls this method?
+
+Show payment flow.
+
+Show authentication flow.
+
+What is impacted by changing this symbol?
+```
+
+---
+
+## Phase 5 - Chunk Mapping
+
+### Goal
+
+Perform semantic chunking.
+
+Chunks should never exist independently.
+
+### Relationships
+
+```text
+Chunk
+
+↓
+
+Method
+
+↓
+
+Class
+
+↓
+
+Module
+```
+
+### Tables
+
+```text
+chunks
+-------
+
+id
+content
+embedding
+
+chunk_symbol_mapping
+--------------------
+
+chunk_id
+symbol_id
+```
+
+### Deliverables
+
+* Symbol-aware embeddings.
+* Semantic chunk retrieval.
+
+---
+
+## Phase 6 - API Graph
+
+### Goal
+
+Index repository entry points.
+
+### Extract
+
+```text
+REST APIs
+
+GraphQL
+
+gRPC
+
+CLI Commands
+
+Cron Jobs
+
+Queue Consumers
+
+Event Handlers
+```
+
+### Tables
+
+```text
+apis
+-----
+
+id
+method
+path
+symbol_id
+
+api_flow
+--------
+
+api_id
+symbol_id
+```
+
+### Deliverables
+
+Generate complete request flows.
+
+---
+
+## Phase 7 - Database Graph
+
+### Goal
+
+Track database relationships.
+
+### Extract
+
+```text
+Tables
+
+Collections
+
+Queries
+
+ORM Models
+
+Migrations
+```
+
+### Relationships
+
+```text
+reads
+
+writes
+
+updates
+
+deletes
+```
+
+### Tables
+
+```text
+database_entities
+
+database_relationships
+```
+
+### Deliverables
+
+Support:
+
+```text
+Which API updates the User table?
+
+Show database dependencies.
+
+Who reads Orders?
+```
+
+---
+
+## Phase 8 - Full Text Search
+
+### Goal
+
+Provide fast symbol and file lookups.
+
+### Technology
+
+```text
+SQLite FTS5
+```
+
+### Index
+
+```text
+Files
+
+Symbols
+
+Imports
+
+Signatures
+
+Documentation
+
+Comments
+```
+
+### Search Strategy
+
+```text
+Exact Match
+    ↓
+SQLite FTS
+    ↓
+Embeddings
+    ↓
+Graph Traversal
+```
+
+---
+
+## Phase 9 - Architecture Summaries
+
+### Goal
+
+Generate AI-friendly repository summaries.
+
+### Summary Levels
+
+```text
+Repository
+
+↓
+
+Module
+
+↓
+
+Directory
+
+↓
+
+File
+
+↓
+
+Symbol
+```
+
+### Example
+
+```text
+Authentication Module
+
+Responsibilities:
+- Login
+- Session Management
+- JWT Generation
+
+Dependencies:
+- Redis
+- OAuth Provider
+
+Exposed APIs:
+- POST /login
+- POST /logout
+```
+
+### Deliverables
+
+* Architectural summaries.
+* Summary embeddings.
+
+---
+
+## Phase 10 - Retrieval Engine
+
+### Goal
+
+Provide intelligent repository retrieval.
+
+### Pipeline
+
+```text
+User Query
+
+↓
+
+Intent Detection
+
+↓
+
+Symbol Search
+
+↓
+
+Graph Traversal
+
+↓
+
+Full Text Search
+
+↓
+
+Embedding Search
+
+↓
+
+Context Expansion
+
+↓
+
+Source Retrieval
+
+↓
+
+LLM Context Builder
+
+↓
+
+Answer
+```
+
+---
+
+## Phase 11 - Lazy Indexing and LSP Enrichment
+
+### Goal
+
+Avoid indexing the entire repository upfront.
+
+### Example
+
+```text
+Repository Opened
+
+↓
+
+Load Workspace Symbols
+
+↓
+
+Store Symbol Metadata
+
+----------------------------
+
+User Query:
+How does authentication work?
+
+↓
+
+Find Authentication Symbols
+
+↓
+
+Retrieve References
+
+↓
+
+Retrieve Call Hierarchy
+
+↓
+
+Build Graph
+
+↓
+
+Persist Results
+
+↓
+
+Return Context
+```
+
+### Benefits
+
+```text
+Smaller initial indexing time.
+
+Incremental graph construction.
+
+Faster repository onboarding.
+```
+
+---
+
+## Phase 12 - Context Expansion
+
+### Goal
+
+Provide highly relevant context to the LLM.
+
+### Expand Using
+
+```text
+Parent Symbol
+
+Caller
+
+Callee
+
+Dependencies
+
+Tests
+
+APIs
+
+Database Usage
+
+Architecture Summary
+```
+
+### Example
+
+Instead of:
+
+```text
+20 random chunks
+```
+
+Provide:
+
+```text
+CheckoutService
+
++
+
+Related Methods
+
++
+
+Call Hierarchy
+
++
+
+Database Usage
+
++
+
+Tests
+
++
+
+Architecture Summary
+
++
+
+Relevant Code
+```
+
+---
+
+## Phase 13 - MCP Server
+
+### Goal
+
+Expose repository intelligence to AI agents.
+
+### MCP Tools
+
+```text
+search_symbol()
+
+search_code()
+
+find_callers()
+
+find_callees()
+
+show_execution_flow()
+
+show_architecture()
+
+find_dependencies()
+
+find_related_files()
+
+find_database_usage()
+
+find_api_flow()
+
+impact_analysis()
+
+repository_summary()
+```
+
+---
+
+## Phase 14 - Tree-sitter Fallback
+
+### Goal
+
+Support unsupported languages and non-code files.
+
+### Supported Targets
+
+```text
+Terraform
+
+YAML
+
+Markdown
+
+SQL
+
+Dockerfile
+
+Proto Files
+
+GraphQL
+
+Unsupported Languages
+```
+
+### Responsibilities
+
+```text
+AST Parsing
+
+Import Extraction
+
+Symbol Extraction
+
+Basic Relationships
+```
+
+### Deliverables
+
+* Universal repository support.
+
+---
+
+## Phase 15 - Visualizations
+
+### Goal
+
+Improve developer experience.
+
+### Views
+
+```text
+Repository Graph
+
+Module Graph
+
+Dependency Graph
+
+Call Graph
+
+API Graph
+
+Database Graph
+```
+
+---
+
+## Phase 16 - Incremental Indexing
+
+### Goal
+
+Support near real-time repository updates.
+
+### Pipeline
+
+```text
+Git Changes
+
+↓
+
+Changed Files
+
+↓
+
+Re-index
+
+↓
+
+Update Symbols
+
+↓
+
+Update Graph
+
+↓
+
+Invalidate Relationships
+
+↓
+
+Update Summaries
+```
+
+---
+
+## Suggested Milestone Order
+
+### Milestone 1
+
+* Repository metadata
+* LSP client
+* Symbol extraction
+
+### Milestone 2
+
+* References
+* Definitions
+* Implementations
+* Type information
+
+### Milestone 3
+
+* Call hierarchy
+* Chunk mapping
+* Full text search
+
+### Milestone 4
+
+* API graph
+* Database graph
+* Architecture summaries
+
+### Milestone 5
+
+* Intelligent retrieval engine
+* Lazy indexing
+* Context expansion
+
+### Milestone 6
+
+* MCP server
+* Visualizations
+* Incremental indexing
+* Tree-sitter fallback
+
+---
+
+## Recommended Tech Stack
+
+```text
+Semantic Intelligence:
+- Language Server Protocol
+
+Fallback Parser:
+- Tree-sitter
+
+Storage:
+- SQLite
+
+Search:
+- SQLite FTS5
+
+Embeddings:
+- Existing embedding pipeline
+
+Graph Layer:
+- SQLite relationship tables
+
+Repository Tracking:
+- Git
+
+AI Layer:
+- LLM + RAG
+
+Agent Layer:
+- MCP Server
+
+Editor Integration:
+- VS Code Extension
+```
+
+---
+
+## Final Architecture
+
+```text
+Repository
+
+↓
+
+Language Detection
+
+↓
+
+Language Server Protocol
+
+↓
+
+Tree-sitter Fallback
+
+↓
+
+Symbol Extraction
+
+↓
+
+Relationship Extraction
+
+↓
+
+Call Hierarchy
+
+↓
+
+API Graph
+
+↓
+
+Database Graph
+
+↓
+
+Chunk Mapping
+
+↓
+
+Architecture Summaries
+
+↓
+
+SQLite Repository Graph
+
+↓
+
+Hybrid Retrieval Engine
+
+↓
+
+Context Expansion
+
+↓
+
+MCP Server
+
+↓
+
+AI Agents / VS Code Extension
+```
+
+## End Goal
+
+The final system should behave like a "Google Maps for repositories", allowing developers and AI agents to:
+
+* Understand repository architecture.
+* Traverse execution flows.
+* Perform impact analysis.
+* Explore APIs and database relationships.
+* Retrieve semantically relevant code.
+* Minimize token usage.
+* Work entirely locally.
+* Support polyglot repositories.
+* Expose repository intelligence through MCP tools.
+

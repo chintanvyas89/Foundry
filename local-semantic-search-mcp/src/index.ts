@@ -10,6 +10,7 @@ import { Indexer } from './indexing/indexer.js';
 import { startWatcher } from './indexing/watcher.js';
 import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
+import { registerTraceCallsTool } from './tools/traceCalls.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -127,6 +128,9 @@ async function main() {
   ready.catch((err) => console.error('[swe-search] background init failed:', err));
 
   registerSemanticSearchTool(server, store, config, workspaceRoot, ready);
+  // Call-graph tool. Doesn't touch the embedder/store — it asks the LSP bridge
+  // — so it needs no `ready` gate and works in query-only mode too.
+  registerTraceCallsTool(server, workspaceRoot);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

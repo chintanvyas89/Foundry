@@ -8,6 +8,27 @@ export interface BridgeSymbol {
   endLine: number;
 }
 
+export interface BridgeCallNode {
+  name: string;
+  detail: string;
+  file: string;
+  line: number;
+  kind: string;
+}
+
+export interface BridgeCallHierarchy {
+  root: BridgeCallNode | null;
+  outgoing: BridgeCallNode[];
+  incoming: BridgeCallNode[];
+}
+
+interface BridgeResponse {
+  id: string;
+  symbols?: BridgeSymbol[];
+  calls?: BridgeCallHierarchy;
+  error?: string;
+}
+
 const CONNECT_TIMEOUT_MS = 2000;
 const REQUEST_TIMEOUT_MS = 8000; // generous — a language server's first
 // activation for a given language can be slow.
@@ -16,7 +37,7 @@ let socket: net.Socket | null = null;
 let connecting: Promise<net.Socket | null> | null = null;
 let nextId = 1;
 let buffer = '';
-const pending = new Map<string, { resolve: (v: BridgeSymbol[]) => void; reject: (e: unknown) => void }>();
+const pending = new Map<string, { resolve: (msg: BridgeResponse) => void; reject: (e: unknown) => void }>();
 
 async function getConnection(workspaceRoot: string): Promise<net.Socket | null> {
   if (socket && !socket.destroyed) return socket;
@@ -65,7 +86,7 @@ function onData(chunk: string) {
     const line = buffer.slice(0, idx);
     buffer = buffer.slice(idx + 1);
     if (!line.trim()) continue;
-    let msg: { id: string; symbols?: BridgeSymbol[]; error?: string };
+    let msg: BridgeResponse;
     try {
       msg = JSON.parse(line);
     } catch {
@@ -75,25 +96,23 @@ function onData(chunk: string) {
     if (!p) continue;
     pending.delete(msg.id);
     if (msg.error) p.reject(new Error(msg.error));
-    else p.resolve(msg.symbols ?? []);
+    else p.resolve(msg);
   }
 }
 
-/**
- * Returns null on any failure (no bridge running, timeout, malformed
- * response) rather than throwing — the caller always has a fallback tier
- * to move to. This function never blocks indexing on the bridge's absence.
- */
-export async function getSymbolsViaBridge(
+// Send one request to the bridge and await its response. Returns null on any
+// failure (no bridge running, timeout, malformed response) rather than throwing
+// — every caller has a fallback and must never block on the bridge's absence.
+async function sendRequest(
   workspaceRoot: string,
-  filePath: string,
-): Promise<BridgeSymbol[] | null> {
+  payload: Record<string, unknown>,
+): Promise<BridgeResponse | null> {
   try {
     const s = await getConnection(workspaceRoot);
     if (!s) return null;
 
     const id = String(nextId++);
-    return await new Promise<BridgeSymbol[]>((resolve, reject) => {
+    return await new Promise<BridgeResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error('LSP bridge request timed out'));
@@ -108,9 +127,30 @@ export async function getSymbolsViaBridge(
           reject(e);
         },
       });
-      s.write(JSON.stringify({ id, type: 'getSymbols', file: filePath }) + '\n');
+      s.write(JSON.stringify({ id, ...payload }) + '\n');
     });
   } catch {
     return null;
   }
+}
+
+export async function getSymbolsViaBridge(
+  workspaceRoot: string,
+  filePath: string,
+): Promise<BridgeSymbol[] | null> {
+  const msg = await sendRequest(workspaceRoot, { type: 'getSymbols', file: filePath });
+  return msg ? (msg.symbols ?? []) : null;
+}
+
+// Call hierarchy for the symbol at (file, line). Returns null when the bridge
+// isn't reachable; returns a result with `root: null` when the language server
+// has no call-hierarchy for that position.
+export async function getCallHierarchyViaBridge(
+  workspaceRoot: string,
+  file: string,
+  line: number,
+  symbol?: string,
+): Promise<BridgeCallHierarchy | null> {
+  const msg = await sendRequest(workspaceRoot, { type: 'callHierarchy', file, line, symbol });
+  return msg?.calls ?? null;
 }

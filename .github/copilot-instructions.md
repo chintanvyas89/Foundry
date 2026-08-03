@@ -28,3 +28,16 @@ files — **call `semantic_search` again to refine**:
   remembers your previous results, so you only pass the numbers — no ids.
 
 Iterate this way a couple of times before falling back to reading files.
+
+## Tracing execution flow
+
+Once `semantic_search` locates a function, use **`trace_calls`** to follow the
+call graph instead of reading files to find callers/callees. Pass the result's
+`file` and `startLine` (and `symbol` if known); it returns the functions it calls
+and the functions that call it, each with a `file:line` you can `trace_calls`
+again to walk further. Good for "who calls X", "what does X call", "trace the
+checkout/auth flow".
+
+`trace_calls` needs the VS Code LSP bridge running and can't resolve dynamic
+dispatch (interfaces/callbacks/DI), cross-language calls, or data flow — for
+those, fall back to `semantic_search` (it finds likely candidates by meaning).

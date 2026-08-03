@@ -3,6 +3,7 @@ import * as net from 'net';
 import * as fs from 'fs';
 import { getPipePath } from './pipeName';
 import { getSymbolsForFile } from './symbolProvider';
+import { getCallHierarchy } from './callHierarchy';
 import { SearchClient } from './searchClient';
 import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
@@ -84,15 +85,20 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 async function handleRequest(socket: net.Socket, line: string) {
-  let msg: { id: string; type: string; file: string };
+  let msg: { id: string; type: string; file: string; line?: number; symbol?: string };
   try {
     msg = JSON.parse(line);
   } catch {
     return; // Malformed request — drop it, don't crash the bridge.
   }
   try {
-    const symbols = await getSymbolsForFile(msg.file);
-    socket.write(JSON.stringify({ id: msg.id, symbols }) + '\n');
+    if (msg.type === 'callHierarchy') {
+      const calls = await getCallHierarchy(msg.file, msg.line ?? 1, msg.symbol);
+      socket.write(JSON.stringify({ id: msg.id, calls }) + '\n');
+    } else {
+      const symbols = await getSymbolsForFile(msg.file);
+      socket.write(JSON.stringify({ id: msg.id, symbols }) + '\n');
+    }
   } catch (err) {
     socket.write(JSON.stringify({ id: msg.id, error: String(err) }) + '\n');
   }

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { SearchClient, SearchResult } from './searchClient';
+import { getCallHierarchy, CallNode } from './callHierarchy';
 
 // Sidebar webview that drives relevance-feedback search: a query box, a context
 // tray (pinned results + a note) that steers the next search, and Refine/Expand
@@ -24,6 +25,8 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
         await this.runSearch(view.webview, msg);
       } else if (msg?.type === 'open') {
         await openAt(msg.file, msg.startLine, msg.endLine);
+      } else if (msg?.type === 'trace') {
+        await this.runTrace(view.webview, msg);
       }
     });
   }
@@ -52,6 +55,32 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
         type: 'results',
         mode: msg.mode ?? 'find',
         results: results.map(toPayload),
+      });
+    } catch (err) {
+      webview.postMessage({
+        type: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      webview.postMessage({ type: 'busy', busy: false });
+    }
+  }
+
+  private async runTrace(
+    webview: vscode.Webview,
+    msg: { file?: string; line?: number; symbol?: string },
+  ): Promise<void> {
+    if (!msg.file || !msg.line) return;
+    webview.postMessage({ type: 'busy', busy: true });
+    try {
+      const calls = await getCallHierarchy(msg.file, msg.line, msg.symbol);
+      webview.postMessage({
+        type: 'calls',
+        calls: {
+          root: calls.root ? withRel(calls.root) : null,
+          outgoing: calls.outgoing.map(withRel),
+          incoming: calls.incoming.map(withRel),
+        },
       });
     } catch (err) {
       webview.postMessage({
@@ -119,6 +148,15 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
   .track { flex: 1; height: 4px; border-radius: 3px; background: var(--vscode-input-background); overflow: hidden; }
   .fill { height: 100%; background: var(--vscode-progressBar-background); }
   .score { font-size: 11px; opacity: .8; font-variant-numeric: tabular-nums; }
+  .btns { display: flex; gap: 5px; flex-shrink: 0; }
+  .hidden { display: none; }
+  .trace-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .trace-title { font-family: var(--vscode-editor-font-family, monospace); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sec { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: .7; margin: 12px 0 5px; }
+  .cnode { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 7px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; margin-bottom: 5px; }
+  .cnode:hover { border-color: var(--vscode-focusBorder); }
+  .cname { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cloc { color: var(--vscode-textLink-foreground); opacity: .8; }
 </style>
 </head>
 <body>
@@ -140,6 +178,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
 
   <div class="status" id="status">Type a query and press Enter.</div>
   <div id="results"></div>
+  <div id="trace" class="hidden"></div>
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
@@ -180,7 +219,10 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
       return '<div class="card">' +
         '<div class="card-head">' +
           '<span class="sym" data-open="' + i + '" title="' + escapeHtml(r.rel) + '">' + escapeHtml(name) + '</span>' +
-          '<button class="pin ' + (pinned ? 'on' : '') + '" data-pin="' + i + '">' + (pinned ? 'Pinned' : 'Pin') + '</button>' +
+          '<span class="btns">' +
+            '<button class="pin" data-trace="' + i + '" title="Trace callers and callees">Calls</button>' +
+            '<button class="pin ' + (pinned ? 'on' : '') + '" data-pin="' + i + '">' + (pinned ? 'Pinned' : 'Pin') + '</button>' +
+          '</span>' +
         '</div>' +
         '<div class="loc" data-open="' + i + '">' + escapeHtml(r.rel) + ':' + r.startLine + '</div>' +
         '<pre class="snippet" data-open="' + i + '">' + escapeHtml(r.snippet || '') + '</pre>' +
@@ -204,6 +246,57 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
         renderPins(); renderResults();
       });
     });
+    el.querySelectorAll('[data-trace]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const r = state.results[Number(btn.dataset.trace)];
+        trace(r.file, r.startLine, r.symbol);
+      });
+    });
+  }
+
+  function trace(file, line, symbol) {
+    $('status').textContent = 'Tracing calls…';
+    vscode.postMessage({ type: 'trace', file, line, symbol });
+  }
+
+  function showResults() {
+    $('trace').classList.add('hidden');
+    $('results').classList.remove('hidden');
+  }
+
+  function renderTrace(calls) {
+    const t = $('trace');
+    const back = '<div class="trace-head"><button id="tback">← Results</button>' +
+      (calls.root ? '<span class="trace-title" title="' + escapeHtml(calls.root.rel) + '">' + escapeHtml(calls.root.name) + '</span>' : '') +
+      '</div>';
+    if (!calls.root) {
+      t.innerHTML = back + '<div class="muted">No call hierarchy here — the language server may not support it (or a language extension for this file isn\\'t installed/active).</div>';
+    } else {
+      t.innerHTML = back + section('Calls (outgoing)', calls.outgoing) + section('Called by (incoming)', calls.incoming);
+    }
+    $('results').classList.add('hidden');
+    t.classList.remove('hidden');
+
+    $('tback').addEventListener('click', showResults);
+    t.querySelectorAll('.cname').forEach((el) => {
+      el.addEventListener('click', () => vscode.postMessage({
+        type: 'open', file: el.dataset.file, startLine: Number(el.dataset.line), endLine: Number(el.dataset.line),
+      }));
+    });
+    t.querySelectorAll('[data-trace2]').forEach((btn) => {
+      btn.addEventListener('click', () => trace(btn.dataset.file, Number(btn.dataset.line), btn.dataset.name));
+    });
+  }
+
+  function section(title, nodes) {
+    if (!nodes.length) return '<div class="sec">' + title + ' (0)</div><div class="muted">none</div>';
+    return '<div class="sec">' + title + ' (' + nodes.length + ')</div>' + nodes.map((n) =>
+      '<div class="cnode">' +
+        '<span class="cname" data-file="' + escapeHtml(n.file) + '" data-line="' + n.line + '">' +
+          escapeHtml(n.name) + ' <span class="cloc">' + escapeHtml(n.rel) + ':' + n.line + '</span></span>' +
+        '<button class="pin" data-trace2="1" data-file="' + escapeHtml(n.file) + '" data-line="' + n.line + '" data-name="' + escapeHtml(n.name) + '">Calls</button>' +
+      '</div>').join('');
   }
 
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
@@ -219,9 +312,13 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
     const m = e.data;
     if (m.type === 'results') {
       state.results = m.results;
+      showResults();
       const label = m.mode === 'refine' ? 'refined' : m.mode === 'expand' ? 'expanded' : 'found';
       $('status').textContent = m.results.length ? m.results.length + ' results (' + label + ')' : 'No matching code found.';
       renderResults();
+    } else if (m.type === 'calls') {
+      renderTrace(m.calls);
+      $('status').textContent = '';
     } else if (m.type === 'busy') {
       if (m.busy) $('status').textContent = 'Searching…';
     } else if (m.type === 'error') {
@@ -255,6 +352,10 @@ function firstLines(text: string, n: number): string {
   const lines = text.split('\n');
   const head = lines.slice(0, n).join('\n');
   return lines.length > n ? `${head}\n…` : head;
+}
+
+function withRel(n: CallNode) {
+  return { ...n, rel: vscode.workspace.asRelativePath(n.file) };
 }
 
 async function openAt(file: string, startLine: number, endLine: number): Promise<void> {
