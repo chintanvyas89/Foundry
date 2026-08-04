@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -57,7 +57,11 @@
         "toolReferenceName": "foundryCodebase",
         "canBeReferencedInPrompt": true,
         "icon": "$(search)",
-        "tags": ["foundry", "codebase", "search"],
+        "tags": [
+          "foundry",
+          "codebase",
+          "search"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -71,11 +75,15 @@
             },
             "expand": {
               "type": "array",
-              "items": { "type": "number" },
+              "items": {
+                "type": "number"
+              },
               "description": "Result numbers from a prior search to fetch full code for."
             }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         }
       },
       {
@@ -83,14 +91,25 @@
         "displayName": "Foundry: symbol lookup",
         "modelDescription": "Look up a symbol by exact or partial name in this workspace (functions, classes, methods, and non-callable declarations like interfaces/enums/types). Use when you know the identifier name.",
         "icon": "$(symbol-method)",
-        "tags": ["foundry", "codebase"],
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
-            "name": { "type": "string", "description": "Symbol name or fragment." },
-            "limit": { "type": "number", "description": "Max results (default 8)." }
+            "name": {
+              "type": "string",
+              "description": "Symbol name or fragment."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Max results (default 8)."
+            }
           },
-          "required": ["name"]
+          "required": [
+            "name"
+          ]
         }
       },
       {
@@ -98,15 +117,30 @@
         "displayName": "Foundry: trace calls",
         "modelDescription": "Show the direct callers and callees of a symbol (one level) from this workspace's call graph. Provide the file and definition line from a prior search result; include the symbol name for the offline fallback.",
         "icon": "$(references)",
-        "tags": ["foundry", "codebase"],
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
-            "file": { "type": "string", "description": "Absolute file path of the symbol." },
-            "line": { "type": "number", "description": "1-based definition line." },
-            "symbol": { "type": "string", "description": "Symbol name (improves accuracy)." }
+            "file": {
+              "type": "string",
+              "description": "Absolute file path of the symbol."
+            },
+            "line": {
+              "type": "number",
+              "description": "1-based definition line."
+            },
+            "symbol": {
+              "type": "string",
+              "description": "Symbol name (improves accuracy)."
+            }
           },
-          "required": ["file", "line"]
+          "required": [
+            "file",
+            "line"
+          ]
         }
       },
       {
@@ -114,21 +148,42 @@
         "displayName": "Foundry: execution flow",
         "modelDescription": "Walk the call graph several levels deep from a symbol in one call — downstream callees or upstream callers — returning an indented tree. Use to trace a whole flow (e.g. 'what does checkout eventually call').",
         "icon": "$(type-hierarchy)",
-        "tags": ["foundry", "codebase"],
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
-            "file": { "type": "string", "description": "Absolute file path of the symbol." },
-            "symbol": { "type": "string", "description": "Symbol name (required)." },
-            "line": { "type": "number", "description": "1-based definition line." },
+            "file": {
+              "type": "string",
+              "description": "Absolute file path of the symbol."
+            },
+            "symbol": {
+              "type": "string",
+              "description": "Symbol name (required)."
+            },
+            "line": {
+              "type": "number",
+              "description": "1-based definition line."
+            },
             "direction": {
               "type": "string",
-              "enum": ["callees", "callers"],
+              "enum": [
+                "callees",
+                "callers"
+              ],
               "description": "Downstream (callees, default) or upstream (callers)."
             },
-            "depth": { "type": "number", "description": "Levels to walk (default 3, max 6)." }
+            "depth": {
+              "type": "number",
+              "description": "Levels to walk (default 3, max 6)."
+            }
           },
-          "required": ["file", "symbol"]
+          "required": [
+            "file",
+            "symbol"
+          ]
         }
       },
       {
@@ -136,15 +191,30 @@
         "displayName": "Foundry: find usages",
         "modelDescription": "List every reference to a symbol across this workspace — use for 'where is X used?' and impact analysis before a change. Provide the file and definition line; include the symbol name for the offline fallback.",
         "icon": "$(references)",
-        "tags": ["foundry", "codebase"],
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
-            "file": { "type": "string", "description": "Absolute file path of the symbol." },
-            "line": { "type": "number", "description": "1-based definition line." },
-            "symbol": { "type": "string", "description": "Symbol name (improves accuracy)." }
+            "file": {
+              "type": "string",
+              "description": "Absolute file path of the symbol."
+            },
+            "line": {
+              "type": "number",
+              "description": "1-based definition line."
+            },
+            "symbol": {
+              "type": "string",
+              "description": "Symbol name (improves accuracy)."
+            }
           },
-          "required": ["file", "line"]
+          "required": [
+            "file",
+            "line"
+          ]
         }
       },
       {
@@ -152,15 +222,30 @@
         "displayName": "Foundry: find implementations",
         "modelDescription": "Find the concrete implementations of an interface or abstract member in this workspace. Provide the file and definition line; include the symbol name for the offline fallback.",
         "icon": "$(symbol-interface)",
-        "tags": ["foundry", "codebase"],
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
-            "file": { "type": "string", "description": "Absolute file path of the symbol." },
-            "line": { "type": "number", "description": "1-based definition line." },
-            "symbol": { "type": "string", "description": "Symbol name (improves accuracy)." }
+            "file": {
+              "type": "string",
+              "description": "Absolute file path of the symbol."
+            },
+            "line": {
+              "type": "number",
+              "description": "1-based definition line."
+            },
+            "symbol": {
+              "type": "string",
+              "description": "Symbol name (improves accuracy)."
+            }
           },
-          "required": ["file", "line"]
+          "required": [
+            "file",
+            "line"
+          ]
         }
       },
       {
@@ -168,7 +253,10 @@
         "displayName": "Foundry: architecture overview",
         "modelDescription": "Get a module-level architecture map of this workspace (modules = directories with their dependencies, dependents, entry points, and reference hotspots). Pass module to drill into one directory. Use to understand how the codebase is organized.",
         "icon": "$(project)",
-        "tags": ["foundry", "codebase"],
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -184,8 +272,14 @@
         "displayName": "Foundry: index overview",
         "modelDescription": "Get a quick orientation summary of the indexed workspace: file/chunk counts, language breakdown, and which code-intelligence indexes (symbols, call graph, usages, implementations) are built.",
         "icon": "$(info)",
-        "tags": ["foundry", "codebase"],
-        "inputSchema": { "type": "object", "properties": {} }
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
       }
     ],
     "viewsContainers": {

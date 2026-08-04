@@ -283,6 +283,7 @@ async function runAgentic(
   const usage = newUsage();
   let answered = false; // did the model stream any answer text?
   let endedMidTools = false; // did we exit the loop while still calling tools?
+  let sawUnbuiltIndex = false; // a tool reported the symbol/graph/usage index isn't built
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     if (token.isCancellationRequested) return {};
@@ -361,6 +362,10 @@ async function runAgentic(
         ]);
       }
       collectRefs(result, refs);
+      // Watch for tools reporting that the symbol/call-graph/usage indexes were
+      // never built — the common reason a weak model spins on empty graph/usage
+      // lookups. We surface a one-time fix hint at the end instead.
+      if (!sawUnbuiltIndex && mentionsUnbuiltIndex(result)) sawUnbuiltIndex = true;
       // Trim before appending: results get re-sent every subsequent round, so a
       // large one inflates input tokens on every request. Cap what the model
       // needs to reason (it can call foundry_semanticSearch with expand for more).
@@ -414,6 +419,7 @@ async function runAgentic(
         'See the “Semantic Search” output channel — the index may be empty, or the ' +
         'selected model may not support tool calls (pick a Copilot model)._',
     );
+    if (sawUnbuiltIndex) emitUnbuiltIndexHint(stream);
     renderUsage(stream, usage);
     return {};
   }
@@ -421,8 +427,40 @@ async function runAgentic(
     const names = [...usedTools].map((n) => n.replace(FOUNDRY_TOOL_PREFIX, '')).join(', ');
     stream.markdown(`\n\n---\n_Grounded via the local index: ${names}._`);
   }
+  if (sawUnbuiltIndex) emitUnbuiltIndexHint(stream);
   renderUsage(stream, usage);
   return {};
+}
+
+// The index-status tools (repo_overview, architecture_overview, show_execution_flow,
+// trace_calls/find_usages offline) say "not built" and point at SWE_BUILD_* when the
+// symbol table / call graph / usages index were never built for this workspace. When
+// that happens the graph/usage tools return nothing, so a weaker model keeps
+// re-searching (burning tool rounds) and the answer is shallow. Detect it so we can
+// tell the user how to fix it.
+function mentionsUnbuiltIndex(result: vscode.LanguageModelToolResult): boolean {
+  let text = '';
+  for (const part of result.content) {
+    if (part instanceof vscode.LanguageModelTextPart) text += part.value + '\n';
+  }
+  return /\bnot built\b/i.test(text) || /SWE_BUILD_/.test(text);
+}
+
+// A single, actionable notice appended once per answer when the code-intelligence
+// indexes are missing on this machine. Embedding-free fix — no re-index of vectors.
+function emitUnbuiltIndexHint(stream: vscode.ChatResponseStream): void {
+  stream.markdown(
+    '\n\n> ⚠️ **Code-intelligence indexes are not built for this workspace**, so ' +
+      'architecture, call-graph, and usage lookups came back empty — the answer above ' +
+      'may be shallow, and a weaker model can make extra tool attempts hunting for them. ' +
+      'Building them is a one-time, **embedding-free** pass (your vectors are untouched):\n' +
+      '>\n' +
+      '> 1. Open this workspace in VS Code with the Foundry extension running (status bar shows `LSP Bridge: listening`).\n' +
+      '> 2. Add `"SWE_BUILD_ALL": "1"` to the `env` in `.vscode/mcp.json`, then restart the `local-semantic-search` MCP server.\n' +
+      '> 3. Wait for the four `done` logs in its output, then remove the flag.\n' +
+      '>\n' +
+      "> Or drop a teammate's prebuilt `.swe-search/index.db` into this workspace — the indexes travel with it.",
+  );
 }
 
 // Fallback when the model doesn't support tool-calling: retrieve with
