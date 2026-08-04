@@ -48,7 +48,10 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
 
 ## Not started ⬜
-API graph (Ph6), DB graph (Ph7), visualizations (Ph15). (Symbol relationships/edges, Ph3, are now persisted as the call graph — see Implemented. Architecture summaries, Ph9, now ship as the deterministic `architecture_overview` map — see Implemented; LLM-authored prose summaries remain a later option.)
+Visualizations (Ph15). (Symbol relationships/edges, Ph3, are now persisted as the call graph — see Implemented. Architecture summaries, Ph9, now ship as the deterministic `architecture_overview` map — see Implemented; LLM-authored prose summaries remain a later option.)
+
+## Dropped — out of scope ✂️
+**API graph (Ph6)** and **DB graph (Ph7)** are intentionally not planned. They require framework-/ORM-specific extraction (REST routes, GraphQL, SQL/ORM models, migrations), which cuts against Foundry's generic, works-for-any-repo direction — high effort, brittle, and narrow. Semantic search + the call graph already surface API/DB code by meaning when asked.
 
 ## Next up (prioritized)
 
@@ -123,10 +126,10 @@ Embedding-free.
 - **Still open:** intent detection (route query → semantic vs symbol vs usages).
 
 ### 5. Later bets — recommended next
-API/DB graphs (Ph6/7), visualizations (Ph15), and
-LLM-authored prose architecture summaries (Ph9 — the deterministic
-`architecture_overview` map already ships; prose narration is the optional next
-step, likely driven by the consuming LLM rather than the offline server).
+Visualizations (Ph15), and LLM-authored prose architecture summaries (Ph9 — the
+deterministic `architecture_overview` map already ships; prose narration is the
+optional next step, likely driven by the consuming LLM rather than the offline
+server). (API/DB graphs, Ph6/7, are dropped — see "Dropped — out of scope".)
 
 ## Known limitations
 - The persisted indexes (call graph, symbols, usages, implementations) are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS` / `SWE_BUILD_USAGES` / `SWE_BUILD_IMPLS`, or `SWE_BUILD_ALL`); until built, `trace_calls`/`show_execution_flow`/`find_usages`/`find_implementations` need the live bridge and `search_symbol` covers callables only.
@@ -458,7 +461,7 @@ symbol_id
 
 ---
 
-## Phase 6 - API Graph
+## Phase 6 - API Graph  — ✂️ DROPPED (out of scope; framework-specific, see top of doc)
 
 ### Goal
 
@@ -506,7 +509,7 @@ Generate complete request flows.
 
 ---
 
-## Phase 7 - Database Graph
+## Phase 7 - Database Graph  — ✂️ DROPPED (out of scope; framework-specific, see top of doc)
 
 ### Goal
 
