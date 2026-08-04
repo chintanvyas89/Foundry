@@ -198,6 +198,7 @@ async function runAgentic(
 
   const messages = buildMessages(preamble, request, chatContext);
   const usedTools = new Set<string>();
+  const seenCalls = new Set<string>(); // (tool, input) already run this turn — skip repeats
   const refs = new Set<string>();
   const usage = newUsage();
   let answered = false; // did the model stream any answer text?
@@ -246,6 +247,24 @@ async function runAgentic(
     for (const call of toolCalls) {
       if (token.isCancellationRequested) return {};
       usedTools.add(call.name);
+
+      // De-dupe: weak models often re-issue the same call. Every tool call still
+      // needs a matching result part, so answer a repeat with a short pointer
+      // instead of re-invoking and re-appending the full (large) result.
+      const key = callKey(call.name, call.input);
+      if (seenCalls.has(key)) {
+        output.appendLine(`[chat] round ${round}: skipped duplicate ${call.name}`);
+        resultParts.push(
+          new vscode.LanguageModelToolResultPart(call.callId, [
+            new vscode.LanguageModelTextPart(
+              '(Already retrieved above with the same input — reuse the earlier result; do not repeat this call.)',
+            ),
+          ]),
+        );
+        continue;
+      }
+      seenCalls.add(key);
+
       stream.progress(labelFor(call));
       let result: vscode.LanguageModelToolResult;
       try {
@@ -260,7 +279,12 @@ async function runAgentic(
         ]);
       }
       collectRefs(result, refs);
-      resultParts.push(new vscode.LanguageModelToolResultPart(call.callId, result.content));
+      // Trim before appending: results get re-sent every subsequent round, so a
+      // large one inflates input tokens on every request. Cap what the model
+      // needs to reason (it can call foundry_semanticSearch with expand for more).
+      resultParts.push(
+        new vscode.LanguageModelToolResultPart(call.callId, trimmedToolContent(result)),
+      );
     }
     messages.push(vscode.LanguageModelChatMessage.User(resultParts));
   }
@@ -609,6 +633,42 @@ function manifestExcerpt(rel: string, raw: string): string {
 function baseName(path: string): string {
   const i = path.replace(/\\/g, '/').lastIndexOf('/');
   return i < 0 ? path : path.slice(i + 1);
+}
+
+// Max characters of a tool result kept in the message history. Results are
+// re-sent to the model on every subsequent round, so this bounds input-token
+// growth; the model can pull more via foundry_semanticSearch expand if needed.
+const MAX_TOOL_RESULT_CHARS = 4000;
+
+// Stable key for a tool call so repeats with the same input are detected
+// regardless of key order.
+function callKey(name: string, input: unknown): string {
+  let body: string;
+  try {
+    if (input && typeof input === 'object' && !Array.isArray(input)) {
+      const obj = input as Record<string, unknown>;
+      body = JSON.stringify(obj, Object.keys(obj).sort());
+    } else {
+      body = JSON.stringify(input);
+    }
+  } catch {
+    body = String(input);
+  }
+  return `${name}:${body}`;
+}
+
+// The content to append for a tool result, with its text capped so re-sending it
+// each round doesn't inflate input tokens. Non-text parts (rare for our tools)
+// pass through untouched when there's no text to trim.
+function trimmedToolContent(
+  result: vscode.LanguageModelToolResult,
+): Array<vscode.LanguageModelTextPart> | vscode.LanguageModelToolResult['content'] {
+  let text = '';
+  for (const part of result.content) {
+    if (part instanceof vscode.LanguageModelTextPart) text += part.value;
+  }
+  if (!text) return result.content;
+  return [new vscode.LanguageModelTextPart(head(text, MAX_TOOL_RESULT_CHARS))];
 }
 
 // First ~n characters (whole lines) of text, with a truncation marker.
