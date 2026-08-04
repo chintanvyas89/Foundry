@@ -8,6 +8,8 @@ import { initEmbedder } from './embedding/embedder.js';
 import { VectorStore } from './storage/store.js';
 import { Indexer } from './indexing/indexer.js';
 import { startWatcher } from './indexing/watcher.js';
+import { buildCallGraph, updateFileGraph } from './indexing/graphBuilder.js';
+import { relative, sep } from 'node:path';
 import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
 import { registerSearchSymbolTool } from './tools/searchSymbol.js';
@@ -139,10 +141,60 @@ async function main() {
       console.error('[swe-search] hybrid search: FTS5 unavailable in this sqlite — vector-only');
     }
 
-    startWatcher(workspaceRoot, indexer, config.exclude);
+    // Keep the persisted call graph current: after a watched file re-indexes,
+    // refetch its edges (only if the graph has already been built, and only if
+    // the bridge is reachable). Embedding-free.
+    const onFileIndexed = (absPath: string) => {
+      const rel = relative(workspaceRoot, absPath).split(sep).join('/');
+      void updateFileGraph(workspaceRoot, store, rel).catch((err) =>
+        console.error(`[swe-search] call graph: incremental update failed for ${rel}:`, err),
+      );
+    };
+    startWatcher(workspaceRoot, indexer, config.exclude, onFileIndexed);
     console.error('[swe-search] incremental watch active');
   })();
   ready.catch((err) => console.error('[swe-search] background init failed:', err));
+
+  // Explicit one-time call-graph build (opt-in via SWE_BUILD_GRAPH=1). Runs
+  // DETACHED — never inside `ready`, which gates search — so a long LSP pass
+  // doesn't block queries. Embedding-free: reads indexed symbols + the LSP
+  // bridge, writes the shareable call_edges graph. Needs VS Code + the bridge
+  // running; aborts cleanly if it isn't.
+  if (holdsIndexLock && process.env.SWE_BUILD_GRAPH === '1') {
+    void (async () => {
+      await ready;
+      console.error(
+        '[swe-search] call graph: starting one-time build (needs the VS Code LSP bridge running)...',
+      );
+      const startAt = Date.now();
+      let lastLog = 0;
+      const stats = await buildCallGraph(workspaceRoot, store, {
+        delayMs: 5,
+        onProgress: (p) => {
+          const now = Date.now();
+          if (now - lastLog < 1000 && p.doneFiles !== p.totalFiles) return;
+          lastLog = now;
+          const elapsed = Math.round((now - startAt) / 1000);
+          console.error(
+            `[swe-search] call graph: ${p.doneFiles}/${p.totalFiles} files, ${p.edges} edges — ${elapsed}s`,
+          );
+        },
+      });
+      if (stats.bridgeDown) {
+        console.error(
+          '[swe-search] call graph: LSP bridge not reachable — build aborted. Open the ' +
+            'workspace in VS Code with the extension active, then restart with SWE_BUILD_GRAPH=1. ' +
+            '(It resumes where it left off.)',
+        );
+      } else {
+        console.error(
+          `[swe-search] call graph: done — ${stats.edges} edges across ${stats.filesProcessed} ` +
+            `files (${stats.filesSkipped} already built). This index.db can be shared; teammates ` +
+            'get the call graph offline (no bridge needed).',
+        );
+      }
+    })().catch((err) => console.error('[swe-search] call graph build failed:', err));
+  }
 
   registerSemanticSearchTool(server, store, config, workspaceRoot, ready);
   // Symbol-name lookup over the stored index — no embedder needed, so no `ready`
@@ -150,7 +202,7 @@ async function main() {
   registerSearchSymbolTool(server, store, config, workspaceRoot);
   // Call-graph tool. Doesn't touch the embedder/store — it asks the LSP bridge
   // — so it needs no `ready` gate and works in query-only mode too.
-  registerTraceCallsTool(server, workspaceRoot);
+  registerTraceCallsTool(server, store, workspaceRoot);
   // find_usages / find_implementations — also bridge-backed, no gate needed.
   registerSymbolRefTools(server, workspaceRoot);
 

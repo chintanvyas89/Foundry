@@ -46,6 +46,36 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 );
 `;
 
+// Persisted call graph. Populated from the LSP bridge's call-hierarchy data by
+// an explicit one-time build pass (embedding-free — no vectors involved), so
+// callers/callees can be answered offline, without VS Code/the bridge running.
+//
+// Each row is a DIRECTED edge `from -> to` (caller -> callee), with `viaFile`
+// recording which file's symbol was being processed when the edge was
+// discovered — that lets incremental re-indexing wipe and refetch exactly the
+// edges owned by a changed file. Paths are workspace-relative (like chunks).
+// `graph_files` tracks which files' edges have been built (keyed on the same
+// fileHash as `files`), making the long build pass resumable and incremental.
+const EDGE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS call_edges (
+  fromFile TEXT NOT NULL,
+  fromLine INTEGER NOT NULL,
+  fromName TEXT NOT NULL,
+  toFile TEXT NOT NULL,
+  toLine INTEGER NOT NULL,
+  toName TEXT NOT NULL,
+  viaFile TEXT NOT NULL,
+  PRIMARY KEY (fromFile, fromLine, fromName, toFile, toLine, toName, viaFile)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_from ON call_edges(fromFile, fromName);
+CREATE INDEX IF NOT EXISTS idx_edges_to ON call_edges(toFile, toName);
+CREATE INDEX IF NOT EXISTS idx_edges_via ON call_edges(viaFile);
+CREATE TABLE IF NOT EXISTS graph_files (
+  path TEXT PRIMARY KEY,
+  fileHash TEXT NOT NULL
+);
+`;
+
 // Paths in `chunks.file` / `chunks.id` / `files.path` are stored RELATIVE to
 // the workspace root (forward-slash separated). That keeps the index portable
 // between machines/checkouts, so it can be shared without every dev re-indexing.
@@ -73,6 +103,7 @@ export class VectorStore {
     // to retry instead of throwing SQLITE_BUSY straight to the caller.
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
     this.db.exec(SCHEMA);
+    this.db.exec(EDGE_SCHEMA);
     try {
       this.db.exec(FTS_SCHEMA);
       this.ftsEnabled = true;
@@ -223,6 +254,8 @@ export class VectorStore {
       if (!keep.has(path)) {
         this.deleteByFile(path);
         this.deleteFileHash(path);
+        this.deleteEdgesByViaFile(path);
+        this.deleteGraphFile(path);
         pruned++;
       }
     }
@@ -450,9 +483,123 @@ export class VectorStore {
     return rows;
   }
 
+  // ---- Call graph (embedding-free) ------------------------------------------
+
+  // Distinct callable symbols in the index — the function/method/class chunks
+  // carry a `symbol`, file, and definition line. The call-graph builder asks the
+  // language server about each of these. Pass `file` to limit to one file (used
+  // by incremental graph updates).
+  listCallableSymbols(file?: string): Array<{ file: string; symbol: string; startLine: number }> {
+    const sql =
+      'SELECT DISTINCT file, symbol, startLine FROM chunks WHERE symbol IS NOT NULL' +
+      (file ? ' AND file = ?' : '') +
+      ' ORDER BY file, startLine';
+    const rows = (file ? this.db.prepare(sql).all(file) : this.db.prepare(sql).all()) as Array<{
+      file: string;
+      symbol: string;
+      startLine: number;
+    }>;
+    return rows;
+  }
+
+  // Insert directed edges, ignoring exact duplicates. Batched in one
+  // transaction like chunk writes. `viaFile` on each edge records the file whose
+  // symbol produced it, so deleteEdgesByViaFile can wipe a file's contributions.
+  upsertEdges(edges: CallEdge[]): void {
+    if (edges.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO call_edges
+        (fromFile, fromLine, fromName, toFile, toLine, toName, viaFile)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    this.db.exec('BEGIN');
+    try {
+      for (const e of edges) {
+        stmt.run(e.fromFile, e.fromLine, e.fromName, e.toFile, e.toLine, e.toName, e.viaFile);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  // Remove every edge discovered while processing `file`'s symbols. Called
+  // before a changed file's edges are refetched, so the graph stays current.
+  deleteEdgesByViaFile(file: string): void {
+    this.db.prepare('DELETE FROM call_edges WHERE viaFile = ?').run(file);
+  }
+
+  // What the symbol at (file, name) calls — its outgoing edges, deduped.
+  getCallees(file: string, name: string): CallGraphNode[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT toFile AS file, toLine AS line, toName AS name
+           FROM call_edges WHERE fromFile = ? AND fromName = ?`,
+      )
+      .all(file, name) as Array<{ file: string; line: number; name: string }>;
+    return rows;
+  }
+
+  // What calls the symbol at (file, name) — its incoming edges, deduped.
+  getCallers(file: string, name: string): CallGraphNode[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT fromFile AS file, fromLine AS line, fromName AS name
+           FROM call_edges WHERE toFile = ? AND toName = ?`,
+      )
+      .all(file, name) as Array<{ file: string; line: number; name: string }>;
+    return rows;
+  }
+
+  getGraphFileHash(file: string): string | null {
+    const row = this.db.prepare('SELECT fileHash FROM graph_files WHERE path = ?').get(file) as
+      | { fileHash: string }
+      | undefined;
+    return row?.fileHash ?? null;
+  }
+
+  setGraphFileHash(file: string, hash: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO graph_files (path, fileHash) VALUES (?, ?)')
+      .run(file, hash);
+  }
+
+  deleteGraphFile(file: string): void {
+    this.db.prepare('DELETE FROM graph_files WHERE path = ?').run(file);
+  }
+
+  // Edge count + how many files have had their edges built — for build-progress
+  // logging and to tell whether the graph has been populated at all.
+  graphStats(): { edges: number; filesBuilt: number } {
+    const edges = (this.db.prepare('SELECT COUNT(*) AS c FROM call_edges').get() as { c: number }).c;
+    const filesBuilt = (this.db.prepare('SELECT COUNT(*) AS c FROM graph_files').get() as { c: number }).c;
+    return { edges, filesBuilt };
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+// A node in the persisted call graph: a symbol identified by its workspace-
+// relative file, definition line, and name.
+export interface CallGraphNode {
+  file: string;
+  line: number;
+  name: string;
+}
+
+// A directed caller -> callee edge, tagged with the file whose symbol produced
+// it (see EDGE_SCHEMA).
+export interface CallEdge {
+  fromFile: string;
+  fromLine: number;
+  fromName: string;
+  toFile: string;
+  toLine: number;
+  toName: string;
+  viaFile: string;
 }
 
 // Common English/question function words carry no lexical signal for code

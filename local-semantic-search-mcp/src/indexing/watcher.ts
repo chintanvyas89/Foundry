@@ -21,6 +21,9 @@ class IndexQueue {
 
   constructor(
     private indexer: Indexer,
+    // Called with the absolute path after a file finishes (re)indexing — lets
+    // the caller keep derived data (e.g. the call graph) in sync incrementally.
+    private afterIndex?: (absPath: string) => void,
     private concurrency = MAX_CONCURRENT,
     private debounceMs = DEBOUNCE_MS,
   ) {}
@@ -68,6 +71,7 @@ class IndexQueue {
       this.active++;
       void this.indexer
         .indexFile(path)
+        .then(() => this.afterIndex?.(path))
         .catch((err) => console.error(`[watcher] failed to index ${path}:`, err))
         .finally(() => {
           this.active--;
@@ -85,9 +89,10 @@ export function startWatcher(
   workspaceRoot: string,
   indexer: Indexer,
   excludePatterns: string[] = [],
+  afterIndex?: (absPath: string) => void,
 ): FSWatcher {
   const ig = buildIgnoreMatcher(workspaceRoot, excludePatterns);
-  const queue = new IndexQueue(indexer);
+  const queue = new IndexQueue(indexer, afterIndex);
 
   const watcher = chokidar.watch(workspaceRoot, {
     ignoreInitial: true,
