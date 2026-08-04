@@ -26,13 +26,26 @@ const BASE_PREAMBLE = [
 const PLAN_PREAMBLE = [
   BASE_PREAMBLE,
   '\n\nThe user wants an IMPLEMENTATION PLAN for a change, not prose.',
-  'First gather context with the foundry_* tools (search for the relevant code,',
-  'check architecture and existing usages/impact). Then output a plan in this shape:',
-  '\n\n## Plan\n**Context:** one or two lines on the current state.\n',
-  '**Files to change:** a bullet per file as `path` — what changes and why.\n',
-  '**Steps:** a numbered, ordered list of concrete edits.\n',
-  '**Verify:** how to test it (commands/tests).\n',
-  'Do NOT write the full code or edit files — propose the plan only, grounded in real files.',
+  'Auto-gathered workspace context (index overview, architecture, the most',
+  'relevant code with FULL bodies, and the real build/test conventions) is',
+  'provided below — read it first. Before proposing changes to ANY function, read',
+  'its FULL implementation (call foundry_semanticSearch and expand the hit, or',
+  'foundry_findUsages) instead of guessing from a signature. Verify build/test',
+  'commands against the provided package.json scripts and test files — never invent',
+  'a command like "npm test". Reason about the runtime/process model, config, and',
+  'concurrency, not just the code.',
+  '\n\nOutput the plan in exactly this shape:',
+  '\n## Plan',
+  '\n**Context:** current state in 1–2 lines.',
+  '\n**Assumptions & open questions:** anything inferred or needing confirmation.',
+  '\n**Files to change:** a bullet per file as `path` — what changes and why.',
+  '\n**Steps:** a numbered, ordered list of concrete edits.',
+  '\n**Risks / staleness:** what could break or go stale — concurrency, caching,',
+  'invalidation, cross-process/query-only state, re-index coupling.',
+  '\n**Alternatives / existing mechanisms:** simpler options or features that may',
+  'already cover this; say plainly if the change may be unnecessary.',
+  '\n**Verify:** the exact test/build commands (from the real conventions above) and a manual check.',
+  '\n\nDo NOT write the full code or edit files — propose the plan only, grounded in real files.',
 ].join(' ');
 
 export function registerChatParticipant(
@@ -64,8 +77,12 @@ export function registerChatParticipant(
         return await renderTool(client, stream, 'architecture_overview', {});
       }
 
-      const preamble = request.command === 'plan' ? PLAN_PREAMBLE : BASE_PREAMBLE;
-      return await runAgentic(request, chatContext, stream, token, preamble, client, output);
+      if (request.command === 'plan') {
+        stream.progress('Gathering workspace context for planning…');
+        const seed = await gatherPlanContext(client, request.prompt, output);
+        return await runAgentic(request, chatContext, stream, token, PLAN_PREAMBLE, client, output, seed);
+      }
+      return await runAgentic(request, chatContext, stream, token, BASE_PREAMBLE, client, output);
     } catch (err) {
       if (err instanceof vscode.CancellationError) return {};
       const m = err instanceof Error ? err.message : String(err);
@@ -116,13 +133,14 @@ async function runAgentic(
   preamble: string,
   client: SearchClient,
   output: vscode.OutputChannel,
+  seedContext?: string,
 ): Promise<vscode.ChatResult> {
   const model = request.model;
   const tools: vscode.LanguageModelChatTool[] = vscode.lm.tools
     .filter((t) => t.name.startsWith(FOUNDRY_TOOL_PREFIX))
     .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
 
-  const messages = buildMessages(preamble, request, chatContext);
+  const messages = buildMessages(preamble, request, chatContext, seedContext);
   const usedTools = new Set<string>();
   const refs = new Set<string>();
   let answered = false; // did the model stream any answer text?
@@ -269,6 +287,7 @@ function buildMessages(
   preamble: string,
   request: vscode.ChatRequest,
   chatContext: vscode.ChatContext,
+  seedContext?: string,
 ): vscode.LanguageModelChatMessage[] {
   const messages: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(preamble),
@@ -287,8 +306,98 @@ function buildMessages(
     }
   }
 
+  // Deterministic context pack (plan mode) — real code + architecture + the
+  // workspace's actual build/test conventions, so the model doesn't fall back
+  // to generic priors.
+  if (seedContext && seedContext.trim()) {
+    messages.push(vscode.LanguageModelChatMessage.User(seedContext));
+  }
+
   messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
   return messages;
+}
+
+// Assemble a rich, deterministic context pack for /plan: index overview, the
+// module architecture, the most relevant code with FULL bodies (not lean
+// signatures), and the workspace's real build/test conventions. All read-only.
+async function gatherPlanContext(
+  client: SearchClient,
+  prompt: string,
+  output: vscode.OutputChannel,
+): Promise<string> {
+  const parts: string[] = [];
+
+  const add = async (label: string, mcpName: string, args: Record<string, unknown>): Promise<void> => {
+    try {
+      const { text } = await client.callTool(mcpName, args);
+      if (text && text.trim()) parts.push(`#### ${label}\n${text.trim()}`);
+    } catch (err) {
+      output.appendLine(`[chat/plan] ${mcpName} failed: ${String(err)}`);
+    }
+  };
+
+  await add('Index overview', 'repo_overview', {});
+  await add('Architecture (modules)', 'architecture_overview', {});
+  // FULL bodies of the most relevant code — the key upgrade over lean signatures.
+  await add('Most relevant code (full bodies)', 'semantic_search', {
+    query: prompt,
+    detail: 'full',
+    topK: 6,
+    context: true,
+  });
+
+  const conventions = await gatherConventions(output);
+  if (conventions) parts.push(conventions);
+
+  if (parts.length === 0) return '';
+  return (
+    'Auto-gathered workspace context for planning (read before proposing changes):\n\n' +
+    parts.join('\n\n')
+  );
+}
+
+// Read the workspace's real build/test conventions so the plan uses actual
+// commands instead of inventing "npm test": every package.json's scripts, plus
+// a sample of test-file paths to reveal the naming/runner convention.
+async function gatherConventions(output: vscode.OutputChannel): Promise<string> {
+  const lines: string[] = [];
+  try {
+    const pkgs = await vscode.workspace.findFiles('**/package.json', '**/node_modules/**', 8);
+    for (const uri of pkgs) {
+      try {
+        const buf = await vscode.workspace.fs.readFile(uri);
+        const json = JSON.parse(Buffer.from(buf).toString('utf8')) as { scripts?: Record<string, string> };
+        const rel = vscode.workspace.asRelativePath(uri);
+        const scripts = json.scripts ? Object.entries(json.scripts) : [];
+        lines.push(
+          scripts.length
+            ? `${rel} scripts:\n  ` + scripts.map(([k, v]) => `${k}: ${v}`).join('\n  ')
+            : `${rel} scripts: (none)`,
+        );
+      } catch {
+        /* skip unreadable/malformed package.json */
+      }
+    }
+  } catch (err) {
+    output.appendLine(`[chat/plan] package.json scan failed: ${String(err)}`);
+  }
+
+  try {
+    const tests = await vscode.workspace.findFiles(
+      '**/{test,tests,__tests__,spec,scripts}/**/*.{mjs,cjs,js,ts}',
+      '**/node_modules/**',
+      40,
+    );
+    const names = tests
+      .map((u) => vscode.workspace.asRelativePath(u))
+      .filter((p) => /(^|\/)(test|spec)|[._-](test|spec)\./i.test(p))
+      .slice(0, 20);
+    if (names.length) lines.push('Test files (naming / runner convention):\n  ' + names.join('\n  '));
+  } catch (err) {
+    output.appendLine(`[chat/plan] test scan failed: ${String(err)}`);
+  }
+
+  return lines.length ? '#### Build / test conventions\n' + lines.join('\n') : '';
 }
 
 function labelFor(call: vscode.LanguageModelToolCallPart): string {
