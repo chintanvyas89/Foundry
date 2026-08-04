@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -254,6 +254,11 @@
           "minimum": 1,
           "maximum": 50,
           "description": "How many results each search returns."
+        },
+        "sweSearch.showUsage": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show an estimated usage footer (model request count + approximate input/output tokens) under @codebase chat answers. This is a local estimate — VS Code does not expose exact Copilot credit/premium-request cost to extensions."
         }
       }
     }

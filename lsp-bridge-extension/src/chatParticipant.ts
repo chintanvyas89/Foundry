@@ -50,6 +50,61 @@ const PLAN_PREAMBLE = [
   'the plan only, grounded in the provided context.',
 ].join(' ');
 
+// Local, best-effort token/request accounting. VS Code does NOT expose the
+// actual Copilot credit / premium-request cost to extensions, so we count what
+// we can: how many model requests we made (the real cost driver) and an
+// estimate of input/output tokens via the model's own tokenizer.
+interface Usage {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+function newUsage(): Usage {
+  return { requests: 0, inputTokens: 0, outputTokens: 0 };
+}
+
+// Counts one model request and estimates its input tokens. Never throws — token
+// counting is best-effort and must not break the answer.
+async function countInput(
+  model: vscode.LanguageModelChat,
+  messages: vscode.LanguageModelChatMessage[],
+  usage: Usage,
+): Promise<void> {
+  usage.requests += 1;
+  try {
+    let total = 0;
+    for (const m of messages) total += await model.countTokens(m);
+    usage.inputTokens += total;
+  } catch {
+    /* tokenizer unavailable — leave the estimate as-is */
+  }
+}
+
+async function countOutput(
+  model: vscode.LanguageModelChat,
+  text: string,
+  usage: Usage,
+): Promise<void> {
+  if (!text) return;
+  try {
+    usage.outputTokens += await model.countTokens(text);
+  } catch {
+    /* best effort */
+  }
+}
+
+function renderUsage(stream: vscode.ChatResponseStream, usage: Usage): void {
+  if (usage.requests === 0) return;
+  if (vscode.workspace.getConfiguration('sweSearch').get<boolean>('showUsage') === false) return;
+  const n = (x: number) => x.toLocaleString();
+  const reqs = `${usage.requests} model request${usage.requests === 1 ? '' : 's'}`;
+  stream.markdown(
+    `\n\n_Usage (estimated): ${reqs} · ~${n(usage.inputTokens)} in / ~${n(usage.outputTokens)} out tokens. ` +
+      'Exact Copilot credits aren’t exposed to extensions._',
+  );
+}
+
 export function registerChatParticipant(
   context: vscode.ExtensionContext,
   client: SearchClient,
@@ -144,12 +199,14 @@ async function runAgentic(
   const messages = buildMessages(preamble, request, chatContext);
   const usedTools = new Set<string>();
   const refs = new Set<string>();
+  const usage = newUsage();
   let answered = false; // did the model stream any answer text?
   let endedMidTools = false; // did we exit the loop while still calling tools?
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     if (token.isCancellationRequested) return {};
 
+    await countInput(model, messages, usage);
     let response: vscode.LanguageModelChatResponse;
     try {
       response = await model.sendRequest(messages, { tools }, token);
@@ -163,20 +220,21 @@ async function runAgentic(
 
     const toolCalls: vscode.LanguageModelToolCallPart[] = [];
     const assistantParts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart> = [];
-    let roundTextLen = 0;
+    let roundText = '';
     for await (const part of response.stream) {
       if (part instanceof vscode.LanguageModelTextPart) {
         stream.markdown(part.value);
         answered = answered || part.value.trim().length > 0;
-        roundTextLen += part.value.length;
+        roundText += part.value;
         assistantParts.push(part);
       } else if (part instanceof vscode.LanguageModelToolCallPart) {
         toolCalls.push(part);
         assistantParts.push(part);
       }
     }
+    await countOutput(model, roundText, usage);
     output.appendLine(
-      `[chat] round ${round}: ${toolCalls.length} tool call(s), ${roundTextLen} chars text`,
+      `[chat] round ${round}: ${toolCalls.length} tool call(s), ${roundText.length} chars text`,
     );
 
     if (toolCalls.length === 0) break; // Model produced its final answer.
@@ -212,21 +270,22 @@ async function runAgentic(
   // so the user always gets a written answer grounded in the tool results.
   if ((endedMidTools || !answered) && !token.isCancellationRequested) {
     try {
-      const finalResp = await model.sendRequest(
-        [
-          ...messages,
-          vscode.LanguageModelChatMessage.User(
-            'Now answer the original question directly, using the tool results above. ' +
-              'Cite concrete files as `path:line`. Do not call any more tools.',
-          ),
-        ],
-        {},
-        token,
-      );
+      const finalMessages = [
+        ...messages,
+        vscode.LanguageModelChatMessage.User(
+          'Now answer the original question directly, using the tool results above. ' +
+            'Cite concrete files as `path:line`. Do not call any more tools.',
+        ),
+      ];
+      await countInput(model, finalMessages, usage);
+      const finalResp = await model.sendRequest(finalMessages, {}, token);
+      let finalText = '';
       for await (const part of finalResp.text) {
         stream.markdown(part);
+        finalText += part;
         answered = answered || part.trim().length > 0;
       }
+      await countOutput(model, finalText, usage);
     } catch (err) {
       output.appendLine(`[chat] final synthesis failed: ${String(err)}`);
     }
@@ -241,12 +300,14 @@ async function runAgentic(
         'See the “Semantic Search” output channel — the index may be empty, or the ' +
         'selected model may not support tool calls (pick a Copilot model)._',
     );
+    renderUsage(stream, usage);
     return {};
   }
   if (usedTools.size > 0) {
     const names = [...usedTools].map((n) => n.replace(FOUNDRY_TOOL_PREFIX, '')).join(', ');
     stream.markdown(`\n\n---\n_Grounded via the local index: ${names}._`);
   }
+  renderUsage(stream, usage);
   return {};
 }
 
@@ -278,10 +339,16 @@ async function runFallbackRag(
         `Question: ${request.prompt}\n\nAnswer using the results above. Cite files as path:line.`,
     ),
   ];
+  const usage = newUsage();
+  await countInput(model, messages, usage);
   const response = await model.sendRequest(messages, {}, token);
+  let text = '';
   for await (const part of response.text) {
     stream.markdown(part);
+    text += part;
   }
+  await countOutput(model, text, usage);
+  renderUsage(stream, usage);
 }
 
 function buildMessages(
@@ -340,13 +407,18 @@ async function runPlan(
     ),
   );
 
+  const usage = newUsage();
   let answered = false;
   try {
+    await countInput(request.model, messages, usage);
     const response = await request.model.sendRequest(messages, {}, token);
+    let text = '';
     for await (const part of response.text) {
       stream.markdown(part);
+      text += part;
       answered = answered || part.trim().length > 0;
     }
+    await countOutput(request.model, text, usage);
   } catch (err) {
     output.appendLine(`[chat/plan] synthesis failed: ${String(err)}`);
     stream.markdown(`\n\n_Couldn't generate the plan: ${String(err)}_`);
@@ -358,6 +430,7 @@ async function runPlan(
         '“Semantic Search” output channel._',
     );
   }
+  renderUsage(stream, usage);
   return {};
 }
 
