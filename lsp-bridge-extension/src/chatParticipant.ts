@@ -24,17 +24,16 @@ const BASE_PREAMBLE = [
 ].join(' ');
 
 const PLAN_PREAMBLE = [
-  BASE_PREAMBLE,
-  '\n\nThe user wants an IMPLEMENTATION PLAN for a change, not prose.',
-  'Auto-gathered workspace context (index overview, architecture, the most',
-  'relevant code with FULL bodies, and the real build/test conventions) is',
-  'provided below — read it first. Before proposing changes to ANY function, read',
-  'its FULL implementation (call foundry_semanticSearch and expand the hit, or',
-  'foundry_findUsages) instead of guessing from a signature. Verify build/test',
-  'commands against the provided package.json scripts and test files — never invent',
-  'a command like "npm test". Reason about the runtime/process model, config, and',
-  'concurrency, not just the code.',
-  '\n\nOutput the plan in exactly this shape:',
+  'You are @codebase, planning an implementation change for the user’s CURRENT VS',
+  'Code workspace. Workspace context is provided below: an index overview, the',
+  'module architecture, the MOST RELEVANT CODE WITH FULL BODIES, and the real',
+  'build/test conventions. Base every claim on that context and the actual code —',
+  'do not guess from memory. If a detail (a function’s determinants, a runtime',
+  'mode) is not shown in the context, say so rather than inventing it. Verify',
+  'build/test commands against the provided package.json scripts and test files —',
+  'NEVER invent a command like "npm test". Reason about the runtime/process model,',
+  'config, and concurrency, not just the code.',
+  '\n\nRespond with ONLY the following markdown, filling every section:',
   '\n## Plan',
   '\n**Context:** current state in 1–2 lines.',
   '\n**Assumptions & open questions:** anything inferred or needing confirmation.',
@@ -42,10 +41,11 @@ const PLAN_PREAMBLE = [
   '\n**Steps:** a numbered, ordered list of concrete edits.',
   '\n**Risks / staleness:** what could break or go stale — concurrency, caching,',
   'invalidation, cross-process/query-only state, re-index coupling.',
-  '\n**Alternatives / existing mechanisms:** simpler options or features that may',
-  'already cover this; say plainly if the change may be unnecessary.',
+  '\n**Alternatives / existing mechanisms:** simpler options or existing features',
+  'that may already cover this; say plainly if the change may be unnecessary.',
   '\n**Verify:** the exact test/build commands (from the real conventions above) and a manual check.',
-  '\n\nDo NOT write the full code or edit files — propose the plan only, grounded in real files.',
+  '\n\nDo NOT write the full code or edit files, and do NOT call any tools — propose',
+  'the plan only, grounded in the provided context.',
 ].join(' ');
 
 export function registerChatParticipant(
@@ -80,7 +80,7 @@ export function registerChatParticipant(
       if (request.command === 'plan') {
         stream.progress('Gathering workspace context for planning…');
         const seed = await gatherPlanContext(client, request.prompt, output);
-        return await runAgentic(request, chatContext, stream, token, PLAN_PREAMBLE, client, output, seed);
+        return await runPlan(request, stream, token, seed, output);
       }
       return await runAgentic(request, chatContext, stream, token, BASE_PREAMBLE, client, output);
     } catch (err) {
@@ -133,14 +133,13 @@ async function runAgentic(
   preamble: string,
   client: SearchClient,
   output: vscode.OutputChannel,
-  seedContext?: string,
 ): Promise<vscode.ChatResult> {
   const model = request.model;
   const tools: vscode.LanguageModelChatTool[] = vscode.lm.tools
     .filter((t) => t.name.startsWith(FOUNDRY_TOOL_PREFIX))
     .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
 
-  const messages = buildMessages(preamble, request, chatContext, seedContext);
+  const messages = buildMessages(preamble, request, chatContext);
   const usedTools = new Set<string>();
   const refs = new Set<string>();
   let answered = false; // did the model stream any answer text?
@@ -287,7 +286,6 @@ function buildMessages(
   preamble: string,
   request: vscode.ChatRequest,
   chatContext: vscode.ChatContext,
-  seedContext?: string,
 ): vscode.LanguageModelChatMessage[] {
   const messages: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(preamble),
@@ -306,15 +304,59 @@ function buildMessages(
     }
   }
 
-  // Deterministic context pack (plan mode) — real code + architecture + the
-  // workspace's actual build/test conventions, so the model doesn't fall back
-  // to generic priors.
-  if (seedContext && seedContext.trim()) {
-    messages.push(vscode.LanguageModelChatMessage.User(seedContext));
-  }
-
   messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
   return messages;
+}
+
+// /plan uses a two-phase flow: gather context deterministically (gatherPlanContext,
+// already run by the caller), then a SINGLE tools-off synthesis call whose only
+// job is to fill the plan template. Removing tool-calling from the final turn
+// makes even a weaker model produce the structured plan reliably.
+async function runPlan(
+  request: vscode.ChatRequest,
+  stream: vscode.ChatResponseStream,
+  token: vscode.CancellationToken,
+  seed: string,
+  output: vscode.OutputChannel,
+): Promise<vscode.ChatResult> {
+  const messages: vscode.LanguageModelChatMessage[] = [
+    vscode.LanguageModelChatMessage.User(PLAN_PREAMBLE),
+  ];
+  if (seed && seed.trim()) {
+    messages.push(vscode.LanguageModelChatMessage.User(seed));
+  } else {
+    stream.markdown(
+      '_Note: no workspace context could be gathered (is the index built and ' +
+        '`sweSearch.serverEntry` set?). Planning from the request alone._\n\n',
+    );
+  }
+  messages.push(
+    vscode.LanguageModelChatMessage.User(
+      `Change requested: ${request.prompt}\n\n` +
+        'Write the plan now, using exactly the sections and headers specified. ' +
+        'Ground every claim in the workspace context above; do not call tools.',
+    ),
+  );
+
+  let answered = false;
+  try {
+    const response = await request.model.sendRequest(messages, {}, token);
+    for await (const part of response.text) {
+      stream.markdown(part);
+      answered = answered || part.trim().length > 0;
+    }
+  } catch (err) {
+    output.appendLine(`[chat/plan] synthesis failed: ${String(err)}`);
+    stream.markdown(`\n\n_Couldn't generate the plan: ${String(err)}_`);
+    return { errorDetails: { message: String(err) } };
+  }
+  if (!answered) {
+    stream.markdown(
+      '_No plan was produced — the selected model may be unavailable. See the ' +
+        '“Semantic Search” output channel._',
+    );
+  }
+  return {};
 }
 
 // Assemble a rich, deterministic context pack for /plan: index overview, the
