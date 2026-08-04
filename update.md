@@ -126,12 +126,25 @@ the model gets structural context in the same call, no separate `trace_calls`/
 Embedding-free.
 - **Still open:** intent detection (route query → semantic vs symbol vs usages).
 
-### 5. Later bets — recommended next
-LLM-authored prose architecture summaries (Ph9 — the deterministic
-`architecture_overview` map already ships; prose narration is the optional next
-step, likely driven by the consuming LLM rather than the offline server). (API/DB
-graphs, Ph6/7, are dropped — see "Dropped — out of scope". Visualizations, Ph15,
-now ship — see Implemented.)
+### 5. Future scope — LLM-authored prose architecture summaries (Ph9)
+The deterministic `architecture_overview` map already ships; this adds
+human-readable **prose** summaries (what each module/file is *for*), which the
+`@codebase` participant can already narrate live. The dedicated feature would
+**precompute + persist** them, designed to stay **embedding-free**:
+- **Generate** with the consuming LLM (the participant, e.g. `/summarize [module]`) —
+  the offline server never runs an LLM. Cost is model requests, not embedding;
+  cache by content hash so unchanged modules aren't re-summarized.
+- **Persist** in a `summaries(scope, path, text, hash)` table (stored text, no vectors).
+- **Retrieve** embedding-free: (a) direct lookup by path — surface the summary
+  inline in `/arch` / `architecture_overview` and `context=true`; (b) index the
+  summary text into **FTS5** (tokenization only, no model) so `semantic_search`'s
+  lexical arm matches summaries by keyword. **No re-embed, no re-index.**
+- **Optional (opt-in):** semantic search over summaries needs vectors — but only of
+  the few dozen summary strings (additive; existing chunk vectors untouched, not a
+  re-index). Add only if FTS proves insufficient.
+
+(API/DB graphs, Ph6/7, are dropped — see "Dropped — out of scope". Visualizations,
+Ph15, now ship — see Implemented.)
 
 ## Known limitations
 - The persisted indexes (call graph, symbols, usages, implementations) are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS` / `SWE_BUILD_USAGES` / `SWE_BUILD_IMPLS`, or `SWE_BUILD_ALL`); until built, `trace_calls`/`show_execution_flow`/`find_usages`/`find_implementations` need the live bridge and `search_symbol` covers callables only.
