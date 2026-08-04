@@ -26,8 +26,15 @@ export interface SymbolBuildProgress {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// How many times to retry a single file whose bridge request comes back null
+// before giving up on THAT file — absorbs a language server that's still warming
+// up right after a window reload, so one slow request doesn't look like an
+// outage.
+const FILE_RETRIES = 3;
+const RETRY_DELAY_MS = 400;
+
 // Scan and persist symbols for one file. Returns the number written, or null if
-// the bridge was unreachable (caller should stop). Replaces the file's rows and
+// the bridge stayed unreachable across retries. Replaces the file's rows and
 // stamps the build marker so the pass is resumable and incremental.
 async function buildForFile(
   workspaceRoot: string,
@@ -35,8 +42,12 @@ async function buildForFile(
   relFile: string,
 ): Promise<number | null> {
   const absFile = join(workspaceRoot, relFile);
-  const symbols = await getAllSymbolsViaBridge(workspaceRoot, absFile);
-  if (symbols === null) return null; // bridge not reachable — abort the pass
+  let symbols = await getAllSymbolsViaBridge(workspaceRoot, absFile);
+  for (let attempt = 0; symbols === null && attempt < FILE_RETRIES; attempt++) {
+    await sleep(RETRY_DELAY_MS);
+    symbols = await getAllSymbolsViaBridge(workspaceRoot, absFile);
+  }
+  if (symbols === null) return null; // still unreachable after retries
 
   const rows: SymbolRow[] = symbols.map((s) => ({
     name: s.name,
@@ -67,6 +78,11 @@ export async function buildSymbols(
     symbols: 0,
     bridgeDown: false,
   };
+  // Only conclude the bridge is actually DOWN (vs one flaky/slow file) after
+  // several files in a row fail — otherwise skip the file and press on, so a
+  // near-complete pass isn't thrown away by a single bad request.
+  const CONSECUTIVE_ABORT = 5;
+  let consecutiveNull = 0;
   let done = 0;
   for (const relFile of files) {
     done++;
@@ -78,9 +94,14 @@ export async function buildSymbols(
     }
     const written = await buildForFile(workspaceRoot, store, relFile);
     if (written === null) {
-      stats.bridgeDown = true;
-      return stats;
+      consecutiveNull++;
+      if (consecutiveNull >= CONSECUTIVE_ABORT) {
+        stats.bridgeDown = true;
+        return stats;
+      }
+      continue; // skip this file (left unstamped, so a later run retries it)
     }
+    consecutiveNull = 0;
     stats.symbols += written;
     stats.filesProcessed++;
     opts.onProgress?.({ doneFiles: done, totalFiles: files.length, symbols: stats.symbols });
