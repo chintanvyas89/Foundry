@@ -107,13 +107,16 @@ absolute node path if VS Code can't find `node`). Then:
   graph) and **Uses** (references across the workspace) buttons, powered by the
   language server.
 
-For Copilot, the server exposes five MCP tools: **`semantic_search`** (by
+For Copilot, the server exposes six MCP tools: **`semantic_search`** (by
 meaning), **`search_symbol`** (exact/partial name), **`trace_calls`** (call
-graph), **`find_usages`** (references), and **`find_implementations`** (of an
-interface). The last three take a result's `file`/`line`, so the agent can look up
+graph, one level), **`show_execution_flow`** (multi-level call-graph walk),
+**`find_usages`** (references), and **`find_implementations`** (of an interface).
+The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
-dispatch, cross-language calls, or data flow.
+dispatch, cross-language calls, or data flow — **except `trace_calls` and
+`show_execution_flow`**, which also answer from the **persisted call graph** (see
+below) when the bridge is down.
 
 `semantic_search` uses **hybrid retrieval**: semantic (vector) ranking with a
 bounded full-text (FTS5) bonus, so exact identifiers/tokens the embedding misses
@@ -132,6 +135,31 @@ receive full code via `structuredContent`.
 These spawn the server in **query-only** mode (reads the index, never builds or
 modifies it), so they coexist with the Copilot-driven server on the same
 `index.db`.
+
+### Persisted call graph (optional, shareable)
+
+`trace_calls` normally asks the live language server, but the whole call graph can
+also be **built once and persisted** so it works offline and can be shared. With
+VS Code open and the extension active, start the server with `SWE_BUILD_GRAPH=1`:
+
+```bash
+SWE_BUILD_GRAPH=1 node local-semantic-search-mcp/dist/index.js
+```
+
+It walks the language server for every callable symbol and stores directed
+caller→callee edges in `call_edges` inside `index.db`. The pass:
+
+- **runs detached** — it never blocks search, and logs progress to stderr;
+- is **resumable** (restart and it continues) and **incremental** (edits refetch
+  just the changed file, via the watcher);
+- takes minutes to ~an hour on large repos — it's a one-time LSP pass, **not a
+  re-embed** (your vectors are reused untouched).
+
+Because edges use workspace-relative paths, the graph rides inside the shared
+`index.db`: build it once, share the file, and teammates get the full call graph
+**offline — no bridge or language server needed**. `trace_calls` automatically
+uses the persisted graph whenever the live bridge isn't running (pass the symbol
+name so it can look the entry up).
 
 **LSP bridge (better chunks).** With the extension running, the status bar shows
 **`LSP Bridge: listening`** — the server then chunks on real editor symbols
@@ -205,6 +233,13 @@ So a dev on a feature branch with a handful of extra files only pays to embed th
 few — everything shared is reused instantly. Requirements: same `model`/`dtype`
 (a mismatch triggers a clean rebuild automatically) and, for maximum reuse, a
 similar code state.
+
+The **call graph travels with the index too.** If the shared `index.db` was built
+with `SWE_BUILD_GRAPH=1` (see [Persisted call graph](#persisted-call-graph-optional-shareable)),
+its `call_edges` are relative-path and portable, so recipients get whole-repo
+`trace_calls` **offline — without a language server or the extension**. Locally
+changed files show stale edges until the watcher refetches them (only if the
+bridge is running); everything else is exact.
 
 To share the one-time **model download** as well (useful for offline machines),
 copy `local-semantic-search-mcp/node_modules/@huggingface/transformers/.cache` too —

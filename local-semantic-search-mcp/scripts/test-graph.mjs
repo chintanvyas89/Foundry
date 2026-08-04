@@ -40,6 +40,24 @@ store.deleteEdgesByViaFile('src/a.ts');
 assert(store.getCallers('src/b.ts', 'b').length === 0, 'deleteEdgesByViaFile removes a.ts contributions');
 assert(store.getCallees('src/b.ts', 'b').length === 1, "other files' edges survive");
 
+// Multi-level chain + cycle — the traversal show_execution_flow walks.
+// Current edges: b -> c. Add c -> d and a cycle d -> b.
+store.upsertEdges([
+  { fromFile: 'src/c.ts', fromLine: 1, fromName: 'c', toFile: 'src/d.ts', toLine: 1, toName: 'd', viaFile: 'src/c.ts' },
+  { fromFile: 'src/d.ts', fromLine: 1, fromName: 'd', toFile: 'src/b.ts', toLine: 1, toName: 'b', viaFile: 'src/d.ts' },
+]);
+assert(store.getCallees('src/c.ts', 'c')[0]?.name === 'd', 'c -> d edge (level 3) reachable');
+assert(store.getCallees('src/d.ts', 'd')[0]?.name === 'b', 'd -> b cycle edge present');
+// A depth-first walk from b following callees must terminate despite the cycle:
+const seen = new Set();
+(function walk(file, name, guard = 0) {
+  const key = `${file}|${name}`;
+  if (seen.has(key) || guard > 50) return;
+  seen.add(key);
+  for (const n of store.getCallees(file, name)) walk(n.file, n.name, guard + 1);
+})('src/b.ts', 'b');
+assert(seen.size === 3, 'cycle-guarded walk from b visits exactly {b,c,d}');
+
 store.close();
 rmSync(dbPath, { force: true });
 rmSync(`${dbPath}-wal`, { force: true });

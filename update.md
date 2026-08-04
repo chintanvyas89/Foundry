@@ -24,6 +24,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Usages / implementations (on-demand)**: `find_usages` + `find_implementations` MCP tools and a panel **Uses** button — references/implementations via the language server — `lsp-bridge-extension/src/references.ts`, `local-semantic-search-mcp/src/tools/symbolRefs.ts`
 - **Hybrid retrieval (FTS5 + embeddings)**: `semantic_search` fuses vector ranking with a bounded FTS5 lexical bonus, so exact identifiers/tokens the embedding misses still surface — without regressing natural-language queries. Identifiers are **split at index + query time** (`cosineSimilarity` ↔ "cosine similarity", `get_user_by_id` ↔ "user id") so word-level queries match compound names. Transparent to callers; no new tool, no re-embed (a one-time FTS text backfill/upgrade reuses stored chunk text, version-gated) — `src/storage/store.ts` (`searchHybrid`/`searchText`/`backfillFts`/`ftsAugment`), `src/tools/semanticSearch.ts`
 - **Token-lean output**: `semantic_search` returns compact signatures (symbol + file:line + score + one-line signature) by default; `expand=[n,…]` pulls full bodies of chosen prior hits without re-querying, and `detail="full"` returns all bodies. Full text still goes to UI clients via `structuredContent` — `src/tools/semanticSearch.ts`, `store.getChunksByIds`
+- **Persisted, shareable call graph**: an explicit one-time build (`SWE_BUILD_GRAPH=1`) walks the LSP bridge and stores directed caller→callee edges in `call_edges` (workspace-relative, so the graph rides inside `index.db` and is shareable — teammates get it offline, no bridge/LSP). Resumable + incremental (`graph_files` markers, watcher refetch on change). `trace_calls` falls back to this graph when the bridge is down. Embedding-free — reuses indexed symbols, no re-embed — `src/indexing/graphBuilder.ts`, `src/storage/store.ts` (`call_edges`/`getCallees`/`getCallers`/`upsertEdges`), `src/tools/traceCalls.ts`
 
 **Beyond the original vision** (built, though not in the 16 phases)
 - Relevance feedback: `pins` / `note` / `mode` (refine/expand), incl. **pin-by-result-number** so the LLM can steer without exposing chunk ids — `src/tools/semanticSearch.ts`
@@ -36,36 +37,42 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 
 ## Partial 🟡
 - **Repo metadata (Ph1):** `files(path, fileHash)` only — no `repositories` table, language/size/mtime columns, or language detection.
-- **LSP symbols (Ph2):** fetched via the bridge for *chunk boundaries* only — not persisted or queryable — `lsp-bridge-extension/src/symbolProvider.ts`, `src/chunking/lspBridgeClient.ts`.
+- **LSP symbols (Ph2):** callable symbols are queryable via `search_symbol` (over `chunks.symbol`) and the persisted call graph; still no standalone `symbols` table for non-callable kinds (interfaces/enums/consts) — `src/chunking/lspBridgeClient.ts`.
 - **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
-- **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback + compact/expand token control; no intent detection, graph traversal, or structural (caller/callee/test) expansion.
-- **MCP tools (Ph13):** 5 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `find_usages`, `find_implementations`).
+- **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback + compact/expand token control; call-graph traversal is available (`trace_calls`, one level) but not yet folded into retrieval as structural (caller/callee/test) context expansion; no intent detection.
+- **MCP tools (Ph13):** 6 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `show_execution_flow`, `find_usages`, `find_implementations`).
 - **Tree-sitter (Ph14):** chunking only; no import/symbol/relationship extraction.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
 
 ## Not started ⬜
-Symbol relationships/edges (Ph3), API graph (Ph6), DB graph (Ph7), architecture summaries (Ph9), lazy indexing (Ph11), visualizations (Ph15).
+API graph (Ph6), DB graph (Ph7), architecture summaries (Ph9), lazy indexing (Ph11), visualizations (Ph15). (Symbol relationships/edges, Ph3, are now persisted as the call graph — see Implemented.)
 
 ## Next up (prioritized)
 
-### ✅ 1. Call graph / execution flow — shipped (on-demand)
+### ✅ 1. Call graph / execution flow — shipped (on-demand + persisted)
 Callers/callees are computed via the language server in
 `lsp-bridge-extension/src/callHierarchy.ts`, exposed two ways: a **Calls** button
 on each panel result, and a **`trace_calls`** MCP tool for Copilot over the bridge
 pipe (`src/chunking/lspBridgeClient.ts` → `getCallHierarchyViaBridge`,
-`local-semantic-search-mcp/src/tools/traceCalls.ts`).
-- **Still open:** persist `symbols` + `call_graph` tables for whole-repo queries
-  (current impl is on-demand, one level per call); a `show_execution_flow`
-  bounded-depth walk as a single tool.
-- **Caveats:** needs the bridge (VS Code + a language server) running — a bare
-  `query.mjs` CLI returns nothing; cannot resolve dynamic dispatch,
+`local-semantic-search-mcp/src/tools/traceCalls.ts`). The graph is now also
+**persisted** (`call_edges`) via an explicit one-time build
+(`SWE_BUILD_GRAPH=1`, `src/indexing/graphBuilder.ts`) — resumable, incremental,
+shareable inside `index.db`, and queried offline by `trace_calls` when the bridge
+is down.
+- **`show_execution_flow`** (shipped): a bounded-depth, multi-level walk over the
+  persisted graph in one call (`src/tools/showExecutionFlow.ts`) — callees or
+  callers, with cycle + node-count guards; offline once the graph is built.
+- **Still open:** a whole-repo panel/graph view.
+- **Caveats:** the *build* needs the bridge (VS Code + a language server) running;
+  once built, queries are offline. Cannot resolve dynamic dispatch,
   cross-language, or data flow (semantic search stays the complement).
 
 ### ✅ 2. Symbol tools (Ph2/3) — shipped
 `search_symbol` (name lookup over indexed chunk symbols), `find_usages`, and
-`find_implementations` (references/implementations via the bridge). **Still open:**
-a dedicated persisted `symbols`/`edges` table for whole-repo relationship queries
-(current impl reuses `chunks.symbol` for names and resolves usages on-demand).
+`find_implementations` (references/implementations via the bridge). The persisted
+`call_edges` table (see #1) now covers whole-repo caller/callee relationships
+offline. **Still open:** a standalone `symbols` table for non-callable kinds
+(interfaces/enums/consts) and persisted `find_usages` results.
 
 ### ✅ 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10) — shipped
 `semantic_search` now fuses semantic (cosine) ranking with a **bounded FTS5

@@ -82,9 +82,18 @@ functions that call it, each with a file:line you can trace_calls again to walk
 further. Good for "who calls X", "what does X call", "trace the checkout/auth
 flow".
 
-Trace calls needs the VS Code LSP bridge running and can't resolve dynamic
+Trace calls uses the live language server when the VS Code LSP bridge is running,
+and otherwise falls back to the persisted call graph if it has been built (pass
+the symbol name so the offline lookup can find it). It can't resolve dynamic
 dispatch (interfaces/callbacks/DI), cross-language calls, or data flow — for
 those, fall back to semantic_search (it finds likely candidates by meaning).
+
+To follow a chain several levels deep in one call — "trace the checkout/auth
+flow", "what does X eventually call/what eventually calls X" — use
+**show_execution_flow** (pass file + symbol, direction "callees"/"callers", and a
+depth) instead of calling trace_calls repeatedly. It walks the persisted call
+graph (works offline once built) with cycle/size guards, returning an indented
+tree.
 
 Related bridge-backed tools (same file/line inputs): **find_usages** lists every
 reference to a symbol across the workspace (use for "where is X used?" and impact
