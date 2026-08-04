@@ -138,4 +138,7 @@ local, offline Foundry index instead — it's the drop-in replacement, backed by
 same `semantic_search` above. The deeper `foundry_*` Language Model tools
 (`foundry_traceCalls`, `foundry_findUsages`, `foundry_architectureOverview`, …)
 expose the rest of the toolset for agent mode. There's also a `@codebase` chat
-participant that answers workspace questions by driving these tools itself.
+participant that answers workspace questions by driving these tools itself. For a
+visual overview, `@codebase /arch` renders a Mermaid module dependency graph and
+`@codebase /graph <symbol>` renders a Mermaid call graph (both offline, no model
+call).

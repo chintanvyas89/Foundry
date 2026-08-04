@@ -35,6 +35,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - Config + `.sweignore` excludes — `src/config.ts`, `src/ignore/ignoreMatcher.ts`
 - **No-LLM VS Code search UI**: Search-by-meaning (QuickPick), Find-similar, and a sidebar panel with a context tray, pins, refine/expand, and code-snippet cards — `lsp-bridge-extension/src/searchPanel.ts`, `searchCommands.ts`, `searchClient.ts`
 - **Lazy indexing (Ph11)**: the initial build no longer blocks search behind a full embedding pass. Files are embedded **most-recently-modified first** (the developer's hot set); once that set is in, `semantic_search` opens and returns partial results with an *"index N% building"* note while the rest streams in the background. A **priority embed queue** (`src/embedding/embedder.ts`) makes a live query's embed preempt the background build (one shared ONNX pipeline). Two gates in `src/indexing/indexState.ts` — `searchable` (hot set done) and `indexComplete` (whole repo; the opt-in `SWE_BUILD_*` passes await it). Default on; `lazyIndex: false` (config) restores block-until-complete; `lazyHotSet` tunes the hot-set size. Unchanged files still skip via content hash — **no re-embed**; `repo_overview` reports `indexing: building (N%) → complete` — `src/indexing/indexer.ts` (mtime order + hot-set-first), `src/index.ts`, `src/tools/semanticSearch.ts`
+- **Visualizations (Ph15)**: Mermaid graphs emitted by the `@codebase` participant and rendered natively by VS Code chat — **no bundled charting library** (zero-dep). `/arch` appends a **module dependency graph** (from `architecture_overview`); `/graph <symbol>` renders a **call graph** (from `show_execution_flow`, `callers`/`callees`); `/plan` appends a **change-impact diagram** (callers of the target symbol) when there's a blast radius. Built deterministically from existing indexes (0 model requests); pure builders in `lsp-bridge-extension/src/mermaid.ts` (unit-tested via `scripts/test-mermaid.mjs`), wired in `chatParticipant.ts`
 - **`@codebase` chat participant + Copilot Language Model tools**: the local index made available *inside Copilot Chat* for teams that disable Copilot's cloud workspace index. `@codebase` runs an agentic loop — the model drives our `foundry_*` tools (registered as VS Code Language Model tools over the same query-only search client) to ground answers on-device; each tool call surfaces as progress (visible retrieval plan) and answers cite files + a "Grounded via" trailer. Slash commands `/index`, `/arch`, and `/plan` (grounded implementation plan). `#foundryCodebase` is the drop-in for the disabled `#codebase` inside Copilot's own chat/agent mode. Zero runtime deps (hand-rolled on the VS Code API), read-only over `index.db` — no re-embed — `lsp-bridge-extension/src/chatParticipant.ts`, `languageModelTools.ts`, `searchClient.ts` (`callTool`)
 - LLM drill-down guidance — `.github/copilot-instructions.md`
 
@@ -48,7 +49,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
 
 ## Not started ⬜
-Visualizations (Ph15). (Symbol relationships/edges, Ph3, are now persisted as the call graph — see Implemented. Architecture summaries, Ph9, now ship as the deterministic `architecture_overview` map — see Implemented; LLM-authored prose summaries remain a later option.)
+(none of the remaining phases.) Symbol relationships/edges (Ph3) are persisted as the call graph; architecture summaries (Ph9) ship as the deterministic `architecture_overview` map (LLM-authored prose remains a later option); visualizations (Ph15) ship as Mermaid graphs in the chat participant — all see Implemented.
 
 ## Dropped — out of scope ✂️
 **API graph (Ph6)** and **DB graph (Ph7)** are intentionally not planned. They require framework-/ORM-specific extraction (REST routes, GraphQL, SQL/ORM models, migrations), which cuts against Foundry's generic, works-for-any-repo direction — high effort, brittle, and narrow. Semantic search + the call graph already surface API/DB code by meaning when asked.
@@ -126,10 +127,11 @@ Embedding-free.
 - **Still open:** intent detection (route query → semantic vs symbol vs usages).
 
 ### 5. Later bets — recommended next
-Visualizations (Ph15), and LLM-authored prose architecture summaries (Ph9 — the
-deterministic `architecture_overview` map already ships; prose narration is the
-optional next step, likely driven by the consuming LLM rather than the offline
-server). (API/DB graphs, Ph6/7, are dropped — see "Dropped — out of scope".)
+LLM-authored prose architecture summaries (Ph9 — the deterministic
+`architecture_overview` map already ships; prose narration is the optional next
+step, likely driven by the consuming LLM rather than the offline server). (API/DB
+graphs, Ph6/7, are dropped — see "Dropped — out of scope". Visualizations, Ph15,
+now ship — see Implemented.)
 
 ## Known limitations
 - The persisted indexes (call graph, symbols, usages, implementations) are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS` / `SWE_BUILD_USAGES` / `SWE_BUILD_IMPLS`, or `SWE_BUILD_ALL`); until built, `trace_calls`/`show_execution_flow`/`find_usages`/`find_implementations` need the live bridge and `search_symbol` covers callables only.

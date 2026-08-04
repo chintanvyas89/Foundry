@@ -84,10 +84,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.8.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.8.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.8.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -172,9 +172,14 @@ Two surfaces, both reading the same local, query-only index:
   local tools to call (semantic search, trace calls, find usages, architecture
   overview…), and each call is shown as a progress line so the retrieval plan is
   visible; the answer ends with a *"Grounded via …"* trailer and clickable file
-  references. Slash commands: **`/index`** (index overview), **`/arch`**
-  (architecture map), and **`/plan <change>`** — a grounded, step-by-step
-  implementation plan for a change (it proposes, it doesn't edit).
+  references. Slash commands: **`/index`** (index overview); **`/arch`**
+  (architecture map **+ a Mermaid module dependency diagram**); **`/graph
+  <symbol>`** (a **Mermaid call graph** for a symbol — prefix `callers` to
+  invert); and **`/plan <change>`** — a grounded, step-by-step implementation plan
+  (it proposes, it doesn't edit) that also appends a **change-impact diagram**
+  (callers of the target symbol) when there's a blast radius to show. The diagrams
+  are plain Mermaid that VS Code chat renders natively — no bundled library — and
+  `/arch`, `/graph` are deterministic (no model request).
 - **Language Model tools.** The same capabilities are registered as Copilot
   *Language Model tools*, so Copilot's own chat and agent mode can call them.
   Type **`#foundryCodebase`** in any chat to pull local-index context (the drop-in
@@ -340,7 +345,7 @@ once:
    and `node_modules/` are gitignored, so this step is always local.)
 2. **Install the extension** (needed to *build/refresh* indexes or use the search
    panel; not needed to just query a shared index): `code --install-extension
-   lsp-bridge-extension/swe-search-lsp-bridge-0.9.8.vsix`. The `.vsix` **is**
+   lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix`. The `.vsix` **is**
    committed, so it's already in the clone.
 3. **Config is committed.** `.vscode/mcp.json` uses `${workspaceFolder}`, so it
    works as-is — no per-machine edits.

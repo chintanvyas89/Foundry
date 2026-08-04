@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { SearchClient } from './searchClient';
 import { FOUNDRY_TOOL_PREFIX } from './languageModelTools';
+import { moduleGraphMermaid, callGraphMermaid, type ModuleNode, type FlowNodeLite } from './mermaid';
 
 // The @codebase chat participant. It answers questions about THIS workspace by
 // letting the model drive our local MCP tools (registered as Language Model
@@ -133,13 +134,16 @@ export function registerChatParticipant(
         return await renderTool(client, stream, 'repo_overview', {});
       }
       if (request.command === 'arch') {
-        return await renderTool(client, stream, 'architecture_overview', {});
+        return await runArch(client, stream);
+      }
+      if (request.command === 'graph') {
+        return await runGraph(request, client, stream, output);
       }
 
       if (request.command === 'plan') {
         stream.progress('Gathering workspace context for planning…');
-        const seed = await gatherPlanContext(client, request.prompt, output);
-        return await runPlan(request, stream, token, seed, output);
+        const { seed, target } = await gatherPlanContext(client, request.prompt, output);
+        return await runPlan(request, stream, token, seed, target, client, output);
       }
       return await runAgentic(request, chatContext, stream, token, BASE_PREAMBLE, client, output);
     } catch (err) {
@@ -178,6 +182,80 @@ async function renderTool(
 ): Promise<vscode.ChatResult> {
   const { text } = await client.callTool(mcpName, args);
   stream.markdown('```\n' + (text || '(no data — is the index built?)') + '\n```');
+  return {};
+}
+
+// /arch — the architecture_overview text PLUS a Mermaid module dependency graph
+// built from the same call's structuredContent. Deterministic (no model call).
+async function runArch(client: SearchClient, stream: vscode.ChatResponseStream): Promise<vscode.ChatResult> {
+  const { text, structured } = await client.callTool('architecture_overview', {});
+  stream.markdown('```\n' + (text || '(no data — is the index built?)') + '\n```');
+  const modules = (structured as { modules?: ModuleNode[] } | undefined)?.modules;
+  if (Array.isArray(modules) && modules.length > 0) {
+    const mmd = moduleGraphMermaid(modules);
+    if (mmd) stream.markdown('\n\n### Module dependency graph\n\n' + mmd);
+  }
+  return {};
+}
+
+// /graph <symbol> — a Mermaid call graph for a symbol (prefix "callers" to
+// invert). Deterministic: resolves the symbol, walks the persisted call graph.
+async function runGraph(
+  request: vscode.ChatRequest,
+  client: SearchClient,
+  stream: vscode.ChatResponseStream,
+  output: vscode.OutputChannel,
+): Promise<vscode.ChatResult> {
+  let arg = request.prompt.trim();
+  let direction: 'callers' | 'callees' = 'callees';
+  const m = /^(callers|callees)\s+(.*)$/i.exec(arg);
+  if (m) {
+    direction = m[1].toLowerCase() as 'callers' | 'callees';
+    arg = m[2].trim();
+  }
+  if (!arg) {
+    stream.markdown(
+      'Give a symbol for a call graph — e.g. `@codebase /graph checkoutOrder` ' +
+        '(or `/graph callers checkoutOrder` to invert). For the module map, use `/arch`.',
+    );
+    return {};
+  }
+
+  let hit: SearchHit | undefined;
+  try {
+    const { structured } = await client.callTool('search_symbol', { name: arg, limit: 1 });
+    hit = (structured as { results?: SearchHit[] } | undefined)?.results?.[0];
+  } catch (err) {
+    output.appendLine(`[chat/graph] search_symbol failed: ${String(err)}`);
+  }
+  if (!hit?.symbol || !hit.file || !hit.startLine) {
+    stream.markdown(`Couldn't find a symbol named \`${arg}\` in the index.`);
+    return {};
+  }
+
+  let root: FlowNodeLite | undefined;
+  try {
+    const { structured } = await client.callTool('show_execution_flow', {
+      file: hit.file,
+      symbol: hit.symbol,
+      line: hit.startLine,
+      direction,
+      depth: 3,
+    });
+    root = (structured as { root?: FlowNodeLite } | undefined)?.root;
+  } catch (err) {
+    output.appendLine(`[chat/graph] show_execution_flow failed: ${String(err)}`);
+  }
+  if (!root?.children || root.children.length === 0) {
+    stream.markdown(
+      `\`${hit.symbol}\` has no ${direction} in the call graph — build it with ` +
+        '`SWE_BUILD_GRAPH=1` (or `SWE_BUILD_ALL=1`) if the graph is empty.',
+    );
+    return {};
+  }
+  stream.markdown(
+    `### Call graph — ${direction} of \`${hit.symbol}\`\n\n` + callGraphMermaid(root, direction),
+  );
   return {};
 }
 
@@ -422,6 +500,8 @@ async function runPlan(
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
   seed: string,
+  target: SearchHit | null,
+  client: SearchClient,
   output: vscode.OutputChannel,
 ): Promise<vscode.ChatResult> {
   const messages: vscode.LanguageModelChatMessage[] = [
@@ -467,6 +547,30 @@ async function runPlan(
     );
   }
   renderUsage(stream, usage);
+
+  // Change-impact diagram (deterministic, 0 model requests) — callers of the
+  // target symbol = the blast radius. Only rendered when there's a target WITH
+  // callers, so it never shows an empty/low-value diagram.
+  if (answered && target?.symbol && target.file && target.startLine) {
+    try {
+      const { structured } = await client.callTool('show_execution_flow', {
+        file: target.file,
+        symbol: target.symbol,
+        line: target.startLine,
+        direction: 'callers',
+        depth: 2,
+      });
+      const root = (structured as { root?: FlowNodeLite } | undefined)?.root;
+      if (root?.children && root.children.length > 0) {
+        stream.markdown(
+          `\n\n### Change impact — callers of \`${target.symbol}\`\n\n` +
+            callGraphMermaid(root, 'callers'),
+        );
+      }
+    } catch (err) {
+      output.appendLine(`[chat/plan] impact diagram failed: ${String(err)}`);
+    }
+  }
   return {};
 }
 
@@ -479,7 +583,7 @@ async function gatherPlanContext(
   client: SearchClient,
   prompt: string,
   output: vscode.OutputChannel,
-): Promise<string> {
+): Promise<{ seed: string; target: SearchHit | null }> {
   const parts: string[] = [];
 
   const add = async (label: string, mcpName: string, args: Record<string, unknown>): Promise<void> => {
@@ -523,11 +627,16 @@ async function gatherPlanContext(
   const conventions = await gatherConventions(output);
   if (conventions) parts.push(conventions);
 
-  if (parts.length === 0) return '';
-  return (
-    'Auto-gathered workspace context for planning (read before proposing changes):\n\n' +
-    parts.join('\n\n')
-  );
+  // The top hit with a concrete symbol is the change target — used to draw the
+  // change-impact (callers) diagram after the plan.
+  const target = hits.find((h) => h?.symbol && h.file && h.startLine) ?? null;
+
+  const seed =
+    parts.length === 0
+      ? ''
+      : 'Auto-gathered workspace context for planning (read before proposing changes):\n\n' +
+        parts.join('\n\n');
+  return { seed, target };
 }
 
 // A structured hit from semantic_search (the fields we use to trace usages).

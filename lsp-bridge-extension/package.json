@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -40,6 +40,10 @@
           {
             "name": "plan",
             "description": "Draft a grounded, step-by-step implementation plan for a change"
+          },
+          {
+            "name": "graph",
+            "description": "Render a Mermaid call graph for a symbol (prefix 'callers' to invert)"
           }
         ]
       }
