@@ -65,7 +65,7 @@ export function registerChatParticipant(
       }
 
       const preamble = request.command === 'plan' ? PLAN_PREAMBLE : BASE_PREAMBLE;
-      return await runAgentic(request, chatContext, stream, token, preamble, output);
+      return await runAgentic(request, chatContext, stream, token, preamble, client, output);
     } catch (err) {
       if (err instanceof vscode.CancellationError) return {};
       const m = err instanceof Error ? err.message : String(err);
@@ -114,6 +114,7 @@ async function runAgentic(
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
   preamble: string,
+  client: SearchClient,
   output: vscode.OutputChannel,
 ): Promise<vscode.ChatResult> {
   const model = request.model;
@@ -124,6 +125,8 @@ async function runAgentic(
   const messages = buildMessages(preamble, request, chatContext);
   const usedTools = new Set<string>();
   const refs = new Set<string>();
+  let answered = false; // did the model stream any answer text?
+  let endedMidTools = false; // did we exit the loop while still calling tools?
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     if (token.isCancellationRequested) return {};
@@ -135,23 +138,30 @@ async function runAgentic(
       // Model can't do tool-calling (or tools rejected) — fall back to a single
       // grounded RAG pass so the participant still answers.
       output.appendLine(`[chat] tool request failed, falling back to RAG: ${String(err)}`);
-      await runFallbackRag(request, stream, model, token, preamble);
+      await runFallbackRag(request, stream, model, client, token, preamble);
       return {};
     }
 
     const toolCalls: vscode.LanguageModelToolCallPart[] = [];
     const assistantParts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart> = [];
+    let roundTextLen = 0;
     for await (const part of response.stream) {
       if (part instanceof vscode.LanguageModelTextPart) {
         stream.markdown(part.value);
+        answered = answered || part.value.trim().length > 0;
+        roundTextLen += part.value.length;
         assistantParts.push(part);
       } else if (part instanceof vscode.LanguageModelToolCallPart) {
         toolCalls.push(part);
         assistantParts.push(part);
       }
     }
+    output.appendLine(
+      `[chat] round ${round}: ${toolCalls.length} tool call(s), ${roundTextLen} chars text`,
+    );
 
     if (toolCalls.length === 0) break; // Model produced its final answer.
+    endedMidTools = true;
 
     messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts));
 
@@ -178,8 +188,41 @@ async function runAgentic(
     messages.push(vscode.LanguageModelChatMessage.User(resultParts));
   }
 
+  // The model may have spent all its rounds calling tools without ever
+  // synthesizing (or produced no text at all). Force one final, tool-free pass
+  // so the user always gets a written answer grounded in the tool results.
+  if ((endedMidTools || !answered) && !token.isCancellationRequested) {
+    try {
+      const finalResp = await model.sendRequest(
+        [
+          ...messages,
+          vscode.LanguageModelChatMessage.User(
+            'Now answer the original question directly, using the tool results above. ' +
+              'Cite concrete files as `path:line`. Do not call any more tools.',
+          ),
+        ],
+        {},
+        token,
+      );
+      for await (const part of finalResp.text) {
+        stream.markdown(part);
+        answered = answered || part.trim().length > 0;
+      }
+    } catch (err) {
+      output.appendLine(`[chat] final synthesis failed: ${String(err)}`);
+    }
+  }
+
   for (const file of refs) {
     stream.reference(vscode.Uri.file(file));
+  }
+  if (!answered) {
+    stream.markdown(
+      '_I gathered context from the local index but the model returned no answer. ' +
+        'See the “Semantic Search” output channel — the index may be empty, or the ' +
+        'selected model may not support tool calls (pick a Copilot model)._',
+    );
+    return {};
   }
   if (usedTools.size > 0) {
     const names = [...usedTools].map((n) => n.replace(FOUNDRY_TOOL_PREFIX, '')).join(', ');
@@ -188,20 +231,32 @@ async function runAgentic(
   return {};
 }
 
-// One-shot fallback when the model doesn't support tool-calling: retrieve with
+// Fallback when the model doesn't support tool-calling: retrieve with
 // semantic_search ourselves and ask the model to answer from those results.
 async function runFallbackRag(
   request: vscode.ChatRequest,
   stream: vscode.ChatResponseStream,
   model: vscode.LanguageModelChat,
+  client: SearchClient,
   token: vscode.CancellationToken,
   preamble: string,
 ): Promise<void> {
   stream.progress('Searching the local index…');
+  let contextText = '';
+  try {
+    const { text } = await client.callTool('semantic_search', {
+      query: request.prompt,
+      context: true,
+    });
+    contextText = text;
+  } catch {
+    /* leave context empty — the model will answer without grounding */
+  }
   const messages = [
     vscode.LanguageModelChatMessage.User(preamble),
     vscode.LanguageModelChatMessage.User(
-      `Question: ${request.prompt}\n\nAnswer using the workspace context above. Cite files as path:line.`,
+      `Workspace search results:\n\n${contextText || '(no results)'}\n\n` +
+        `Question: ${request.prompt}\n\nAnswer using the results above. Cite files as path:line.`,
     ),
   ];
   const response = await model.sendRequest(messages, {}, token);
