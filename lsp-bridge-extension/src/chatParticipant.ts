@@ -244,6 +244,7 @@ async function runAgentic(
     messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts));
 
     const resultParts: vscode.LanguageModelToolResultPart[] = [];
+    let newCalls = 0; // non-duplicate calls that actually retrieved something
     for (const call of toolCalls) {
       if (token.isCancellationRequested) return {};
       usedTools.add(call.name);
@@ -264,6 +265,7 @@ async function runAgentic(
         continue;
       }
       seenCalls.add(key);
+      newCalls += 1;
 
       stream.progress(labelFor(call));
       let result: vscode.LanguageModelToolResult;
@@ -287,6 +289,14 @@ async function runAgentic(
       );
     }
     messages.push(vscode.LanguageModelChatMessage.User(resultParts));
+
+    // If a round produced tool calls but none were new (all duplicates), the
+    // model is spinning — stop looping and let the final synthesis answer,
+    // instead of burning more requests on repeats.
+    if (newCalls === 0) {
+      output.appendLine(`[chat] round ${round}: all calls were duplicates — ending tool loop`);
+      break;
+    }
   }
 
   // The model may have spent all its rounds calling tools without ever
