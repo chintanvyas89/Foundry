@@ -97,7 +97,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
 
   private async runTrace(
     webview: vscode.Webview,
-    msg: { file?: string; line?: number; symbol?: string },
+    msg: { file?: string; line?: number; symbol?: string; token?: string },
   ): Promise<void> {
     if (!msg.file || !msg.line) return;
     webview.postMessage({ type: 'busy', busy: true });
@@ -105,6 +105,9 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
       const calls = await getCallHierarchy(msg.file, msg.line, msg.symbol);
       webview.postMessage({
         type: 'calls',
+        // Echoed back so the webview attaches these children to the exact node
+        // that requested expansion (the call tree loads lazily, node by node).
+        token: msg.token ?? null,
         calls: {
           root: calls.root ? withRel(calls.root) : null,
           outgoing: calls.outgoing.map(withRel),
@@ -211,6 +214,18 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
   .cnode:hover { border-color: var(--vscode-focusBorder); }
   .cname { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cloc { color: var(--vscode-textLink-foreground); opacity: .8; }
+  /* Lazily-expandable call tree */
+  .tnode { user-select: none; }
+  .trow { display: flex; align-items: center; gap: 5px; padding: 2px 3px; border-radius: 4px; white-space: nowrap; }
+  .trow:hover { background: var(--vscode-list-hoverBackground); }
+  .tw { width: 12px; flex-shrink: 0; text-align: center; cursor: pointer; opacity: .8; font-size: 10px; }
+  .tw.leaf { opacity: .25; cursor: default; }
+  .tname { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
+  .tname:hover { text-decoration: underline; }
+  .tloc { color: var(--vscode-textLink-foreground); opacity: .7; font-size: 11px; flex-shrink: 0; }
+  .tdir { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; opacity: .55; margin: 3px 0 1px; }
+  .tkids { margin-left: 12px; border-left: 1px solid var(--vscode-panel-border); padding-left: 6px; }
+  .tmark { opacity: .55; font-size: 11px; font-style: italic; padding: 1px 3px; }
 </style>
 </head>
 <body>
@@ -317,7 +332,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
       btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         const r = state.results[Number(btn.dataset.trace)];
-        trace(r.file, r.startLine, r.symbol);
+        trace(r.file, r.startLine, r.symbol, r.rel);
       });
     });
     el.querySelectorAll('[data-refs]').forEach((btn) => {
@@ -329,9 +344,107 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  function trace(file, line, symbol) {
+  // --- Lazily-expandable call tree ---
+  const tree = { root: null, nodes: new Map() };
+  let uidSeq = 0;
+  const nodeKey = (n) => n.name + '|' + n.file;
+
+  function makeNode(d, ancestors) {
+    const node = {
+      uid: 'n' + (uidSeq++), name: d.name, file: d.file, line: d.line, rel: d.rel,
+      loaded: false, loading: false, expanded: false, noHierarchy: false,
+      calls: [], callers: [], ancestors,
+      cycle: ancestors.indexOf(d.name + '|' + d.file) >= 0,
+    };
+    tree.nodes.set(node.uid, node);
+    return node;
+  }
+
+  // Entry: start a fresh tree rooted at a result/symbol.
+  function trace(file, line, symbol, rel) {
+    tree.nodes.clear();
+    uidSeq = 0;
+    tree.root = makeNode({ name: symbol || rel.split('/').pop(), file, line, rel }, []);
+    tree.root.symbol = symbol;
     $('status').textContent = 'Tracing calls…';
-    vscode.postMessage({ type: 'trace', file, line, symbol });
+    $('results').classList.add('hidden');
+    $('trace').classList.remove('hidden');
+    expandNode(tree.root);
+  }
+
+  // Toggle a node: fetch its hierarchy the first time (lazily), then just
+  // collapse/expand. Cycles are marked, not fetched.
+  function expandNode(node) {
+    if (node.cycle) return;
+    if (node.loaded) { node.expanded = !node.expanded; renderTree(); return; }
+    if (node.loading) return;
+    node.loading = true;
+    renderTree();
+    vscode.postMessage({
+      type: 'trace', token: node.uid, file: node.file, line: node.line, symbol: node.symbol ?? node.name,
+    });
+  }
+
+  // A trace response arrived for the node whose token we echoed.
+  function onCalls(m) {
+    const node = m.token && tree.nodes.get(m.token);
+    if (!node) return; // stale/unknown token
+    node.loading = false;
+    node.loaded = true;
+    node.expanded = true;
+    if (m.calls.root) {
+      if (node === tree.root) {
+        node.name = m.calls.root.name; node.file = m.calls.root.file;
+        node.line = m.calls.root.line; node.rel = m.calls.root.rel;
+      }
+      const anc = node.ancestors.concat(nodeKey(node));
+      node.calls = m.calls.outgoing.map((c) => makeNode(c, anc));
+      node.callers = m.calls.incoming.map((c) => makeNode(c, anc));
+    } else {
+      node.calls = []; node.callers = []; node.noHierarchy = true;
+    }
+    $('results').classList.add('hidden');
+    $('trace').classList.remove('hidden');
+    renderTree();
+  }
+
+  function renderNode(node) {
+    const tw = node.cycle
+      ? '<span class="tw leaf" title="already shown above">↑</span>'
+      : node.loading
+        ? '<span class="tw">⋯</span>'
+        : '<span class="tw" data-tog="' + node.uid + '">' + (node.loaded && node.expanded ? '▾' : '▸') + '</span>';
+    const row = '<div class="trow">' + tw +
+      '<span class="tname" data-open="' + node.uid + '" title="' + escapeHtml(node.rel) + '">' + escapeHtml(node.name) + '</span>' +
+      '<span class="tloc" data-open="' + node.uid + '">' + escapeHtml(node.rel) + ':' + node.line + '</span></div>';
+    let kids = '';
+    if (node.loaded && node.expanded) {
+      if (node.noHierarchy) {
+        kids = '<div class="tkids"><div class="tmark">no call hierarchy here</div></div>';
+      } else {
+        const grp = (label, arr) => '<div class="tdir">' + label + ' (' + arr.length + ')</div>' +
+          (arr.length ? arr.map(renderNode).join('') : '<div class="tmark">none</div>');
+        kids = '<div class="tkids">' + grp('calls', node.calls) + grp('called by', node.callers) + '</div>';
+      }
+    }
+    return '<div class="tnode">' + row + kids + '</div>';
+  }
+
+  function renderTree() {
+    const t = $('trace');
+    if (!tree.root) { t.innerHTML = ''; return; }
+    t.innerHTML = '<div class="trace-head"><button id="tback">← Results</button>' +
+      '<span class="trace-title">Call tree</span></div>' + renderNode(tree.root);
+    t.querySelector('#tback').addEventListener('click', showResults);
+    t.querySelectorAll('[data-tog]').forEach((el) => {
+      el.addEventListener('click', () => { const n = tree.nodes.get(el.dataset.tog); if (n) expandNode(n); });
+    });
+    t.querySelectorAll('[data-open]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const n = tree.nodes.get(el.dataset.open);
+        if (n) vscode.postMessage({ type: 'open', file: n.file, startLine: n.line, endLine: n.line });
+      });
+    });
   }
 
   function refs(file, line, symbol) {
@@ -342,30 +455,6 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
   function showResults() {
     $('trace').classList.add('hidden');
     $('results').classList.remove('hidden');
-  }
-
-  function renderTrace(calls) {
-    const t = $('trace');
-    const back = '<div class="trace-head"><button id="tback">← Results</button>' +
-      (calls.root ? '<span class="trace-title" title="' + escapeHtml(calls.root.rel) + '">' + escapeHtml(calls.root.name) + '</span>' : '') +
-      '</div>';
-    if (!calls.root) {
-      t.innerHTML = back + '<div class="muted">No call hierarchy here — the language server may not support it (or a language extension for this file isn\\'t installed/active).</div>';
-    } else {
-      t.innerHTML = back + section('Calls (outgoing)', calls.outgoing) + section('Called by (incoming)', calls.incoming);
-    }
-    $('results').classList.add('hidden');
-    t.classList.remove('hidden');
-
-    $('tback').addEventListener('click', showResults);
-    t.querySelectorAll('.cname').forEach((el) => {
-      el.addEventListener('click', () => vscode.postMessage({
-        type: 'open', file: el.dataset.file, startLine: Number(el.dataset.line), endLine: Number(el.dataset.line),
-      }));
-    });
-    t.querySelectorAll('[data-trace2]').forEach((btn) => {
-      btn.addEventListener('click', () => trace(btn.dataset.file, Number(btn.dataset.line), btn.dataset.name));
-    });
   }
 
   function renderRefs(m) {
@@ -392,16 +481,6 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  function section(title, nodes) {
-    if (!nodes.length) return '<div class="sec">' + title + ' (0)</div><div class="muted">none</div>';
-    return '<div class="sec">' + title + ' (' + nodes.length + ')</div>' + nodes.map((n) =>
-      '<div class="cnode">' +
-        '<span class="cname" data-file="' + escapeHtml(n.file) + '" data-line="' + n.line + '">' +
-          escapeHtml(n.name) + ' <span class="cloc">' + escapeHtml(n.rel) + ':' + n.line + '</span></span>' +
-        '<button class="pin" data-trace2="1" data-file="' + escapeHtml(n.file) + '" data-line="' + n.line + '" data-name="' + escapeHtml(n.name) + '">Calls</button>' +
-      '</div>').join('');
-  }
-
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
   $('go').addEventListener('click', submit);
@@ -423,7 +502,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
       $('status').textContent = m.results.length ? m.results.length + ' results (' + label + ')' : (m.mode === 'symbol' ? 'No symbol matches.' : 'No matching code found.');
       renderResults();
     } else if (m.type === 'calls') {
-      renderTrace(m.calls);
+      onCalls(m);
       $('status').textContent = '';
     } else if (m.type === 'reflist') {
       renderRefs(m);

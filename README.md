@@ -80,10 +80,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.7.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.7.0.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.8.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.8.0.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.7.0.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.8.0.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -103,9 +103,10 @@ absolute node path if VS Code can't find `node`). Then:
   then **Refine** (narrow to high-confidence hits) or **Expand** (broaden). Pins
   reuse the result's stored vector, so refining costs no extra embedding — it's
   relevance feedback, still with no LLM. A **Symbol name** toggle switches to
-  exact identifier lookup; each result also has **Calls** (callers/callees — call
-  graph) and **Uses** (references across the workspace) buttons, powered by the
-  language server.
+  exact identifier lookup; each result also has **Calls** — which opens an
+  **explorable call tree** you expand node by node (callers *and* callees at each
+  step, click to open, cycle-guarded) — and **Uses** (references across the
+  workspace), both powered by the language server.
 
 For Copilot, the server exposes six MCP tools: **`semantic_search`** (by
 meaning), **`search_symbol`** (exact/partial name — callables *and* non-callable

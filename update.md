@@ -62,7 +62,10 @@ is down.
 - **`show_execution_flow`** (shipped): a bounded-depth, multi-level walk over the
   persisted graph in one call (`src/tools/showExecutionFlow.ts`) — callees or
   callers, with cycle + node-count guards; offline once the graph is built.
-- **Still open:** a whole-repo panel/graph view.
+- **Explorable call tree in the panel** (shipped): the extension's **Calls** action
+  opens a lazily-expandable tree (`lsp-bridge-extension/src/searchPanel.ts`) — each
+  node expands its callers/callees inline via the live language server, click to
+  open, cycle-guarded. No-LLM.
 - **Caveats:** the *build* needs the bridge (VS Code + a language server) running;
   once built, queries are offline. Cannot resolve dynamic dispatch,
   cross-language, or data flow (semantic search stays the complement).
