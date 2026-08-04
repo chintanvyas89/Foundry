@@ -39,7 +39,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Repo metadata (Ph1):** `files(path, fileHash)` only — no `repositories` table, language/size/mtime columns, or language detection.
 - **LSP symbols (Ph2):** callable symbols are queryable via `search_symbol` (over `chunks.symbol`) and the persisted call graph; still no standalone `symbols` table for non-callable kinds (interfaces/enums/consts) — `src/chunking/lspBridgeClient.ts`.
 - **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
-- **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback + compact/expand token control; call-graph traversal is available (`trace_calls`, one level) but not yet folded into retrieval as structural (caller/callee/test) context expansion; no intent detection.
+- **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback + compact/expand token control; call-graph context is now folded into retrieval opt-in (`context=true` annotates each hit with callers/callees); still open: enclosing-parent/test context and intent detection.
 - **MCP tools (Ph13):** 6 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `show_execution_flow`, `find_usages`, `find_implementations`).
 - **Tree-sitter (Ph14):** chunking only; no import/symbol/relationship extraction.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
@@ -96,9 +96,14 @@ signature, so the model triages without whole function bodies in context.
 `expand=[n,…]` fetches the full code of chosen prior hits with no re-query
 (`store.getChunksByIds`); `detail="full"` returns every body at once. UI clients
 still get full text via `structuredContent`.
-- **Still open:** structural context expansion (return a hit plus its
-  parent/callers/tests instead of a raw chunk) — depends on the persisted
-  symbol/edge tables noted under #1/#2.
+
+**Structural context expansion — shipped (opt-in).** `context=true` annotates
+each hit with its callers/callees from the persisted call graph
+(`store.getCallers`/`getCallees`, rendered as a one-line `calls: … · called by: …`),
+so the model gets execution context in the same call — no separate `trace_calls`.
+Opt-in to stay token-lean; a no-op when the graph isn't built. Embedding-free.
+- **Still open:** fold in the enclosing parent symbol and related tests (needs the
+  standalone `symbols` table noted under #1/#2); intent detection.
 
 ### 5. Later bets — recommended next
 Lazy indexing (Ph11), architecture summaries (Ph9), API/DB graphs (Ph6/7), visualizations (Ph15).

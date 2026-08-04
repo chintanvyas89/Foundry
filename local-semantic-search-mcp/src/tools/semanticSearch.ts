@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { embed } from '../embedding/embedder.js';
-import type { VectorStore } from '../storage/store.js';
+import type { VectorStore, CallGraphNode } from '../storage/store.js';
 import { blend } from '../storage/similarity.js';
 import type { Config } from '../config.js';
 
@@ -44,7 +44,9 @@ export function registerSemanticSearchTool(
       'TO DRILL DOWN, call it again: set mode="refine" to narrow to high-confidence ' +
       'hits or mode="expand" to broaden; add a note to sharpen intent; and/or pass ' +
       'pinResults with the NUMBERS of the previous results you found on-target (e.g. ' +
-      'pinResults=[1,3]) to steer the next search toward them.',
+      'pinResults=[1,3]) to steer the next search toward them. ' +
+      'Pass context=true to annotate each hit with its callers/callees from the call ' +
+      'graph (execution context inline, no extra trace_calls needed).',
     {
       query: z
         .string()
@@ -70,6 +72,15 @@ export function registerSemanticSearchTool(
             'want (e.g. [1, 3]). Returns those bodies without re-running the search; no ' +
             'query needed.',
         ),
+      context: z
+        .boolean()
+        .optional()
+        .describe(
+          'When true, annotate each hit with its callers/callees from the persisted ' +
+            'call graph (who calls it, what it calls) — execution context without a ' +
+            'second trace_calls. Needs the call graph to have been built; adds a few ' +
+            'tokens per hit, so leave off unless you want the flow around a result.',
+        ),
       pinResults: z
         .array(z.number().int().positive())
         .optional()
@@ -94,7 +105,7 @@ export function registerSemanticSearchTool(
             'non-LLM UI clients. Prefer pinResults if you are working from the text output.',
         ),
     },
-    async ({ query, topK, pins, pinResults, note, mode, detail, expand }) => {
+    async ({ query, topK, pins, pinResults, note, mode, detail, expand, context }) => {
       // Block until the background model load + initial index have finished.
       // A query that arrives during startup waits here rather than running
       // against a not-yet-loaded embedder or an empty store.
@@ -192,12 +203,27 @@ export function registerSemanticSearchTool(
         };
       }
 
+      // Structural context (opt-in): annotate each hit with its callers/callees
+      // from the persisted call graph, so the model gets execution context in
+      // the same call. Keyed by the stored (workspace-relative) file + symbol —
+      // the same keys the graph was built with — so it's a cheap DB lookup, no
+      // embedder or bridge. Skipped entirely when the graph isn't built.
+      const contextById = new Map<string, StructuralContext>();
+      if (context === true && store.graphStats().edges > 0) {
+        for (const r of results) {
+          if (!r.symbol) continue;
+          const callers = store.getCallers(r.file, r.symbol);
+          const callees = store.getCallees(r.file, r.symbol);
+          if (callers.length || callees.length) contextById.set(r.id, { callers, callees });
+        }
+      }
+
       // Stored paths are workspace-relative for portability; resolve each to an
       // absolute path against THIS machine's workspace root so callers (the
       // human-readable text and structured clients like the editor search
       // panel) can open the file directly. `id` is passed through opaquely so a
       // client can pin the result back for relevance feedback.
-      const resolved = results.map((r) => resolveResult(r, workspaceRoot));
+      const resolved = results.map((r) => resolveResult(r, workspaceRoot, contextById.get(r.id)));
 
       // Compact by default (signatures only — token-lean); full bodies on
       // request. structuredContent always carries the full text so non-LLM UI
@@ -211,6 +237,14 @@ export function registerSemanticSearchTool(
   );
 }
 
+// Callers/callees of a result, from the persisted call graph (opt-in via
+// `context`). Absent when context wasn't requested or the graph has no edges
+// for the symbol.
+interface StructuralContext {
+  callers: CallGraphNode[];
+  callees: CallGraphNode[];
+}
+
 interface ResolvedResult {
   id: string;
   file: string;
@@ -219,13 +253,16 @@ interface ResolvedResult {
   endLine: number;
   score: number;
   text: string;
+  context?: StructuralContext;
 }
 
 // Resolve a stored (workspace-relative) result to an absolute-path result the
-// caller can open directly.
+// caller can open directly. `context` (callers/callees) is attached only when
+// structural context was requested and the graph had edges for the symbol.
 function resolveResult(
   r: { id: string; file: string; symbol?: string; startLine: number; endLine: number; score: number; text: string },
   workspaceRoot: string,
+  context?: StructuralContext,
 ): ResolvedResult {
   return {
     id: r.id,
@@ -235,6 +272,7 @@ function resolveResult(
     endLine: r.endLine,
     score: r.score,
     text: r.text,
+    ...(context ? { context } : {}),
   };
 }
 
@@ -253,10 +291,28 @@ function signatureOf(text: string): string {
   return nonEmpty.length > 1 ? `${clipped} …` : clipped;
 }
 
-// Token-lean listing: number, symbol/location, score, one-line signature.
+// One-line structural-context annotation from the call graph: what the symbol
+// calls and who calls it, names deduped and capped so it stays token-lean.
+function contextLine(ctx: StructuralContext): string {
+  const names = (ns: CallGraphNode[]): string => {
+    const uniq = [...new Set(ns.map((n) => n.name))];
+    const shown = uniq.slice(0, 4).join(', ');
+    return uniq.length > 4 ? `${shown} +${uniq.length - 4}` : shown;
+  };
+  const parts: string[] = [];
+  if (ctx.callees.length) parts.push(`calls: ${names(ctx.callees)}`);
+  if (ctx.callers.length) parts.push(`called by: ${names(ctx.callers)}`);
+  return parts.join('  ·  ');
+}
+
+// Token-lean listing: number, symbol/location, score, one-line signature, and
+// (when requested) a one-line callers/callees annotation.
 function renderCompact(resolved: ResolvedResult[]): string {
   const body = resolved
-    .map((r, i) => `${i + 1}. ${label(r)} — score ${r.score.toFixed(3)}\n    ${signatureOf(r.text)}`)
+    .map((r, i) => {
+      const base = `${i + 1}. ${label(r)} — score ${r.score.toFixed(3)}\n    ${signatureOf(r.text)}`;
+      return r.context ? `${base}\n    ${contextLine(r.context)}` : base;
+    })
     .join('\n\n');
   return (
     `${body}\n\n` +
@@ -272,7 +328,8 @@ function renderFull(resolved: ResolvedResult[], withScore = true): string {
   return resolved
     .map((r, i) => {
       const head = withScore ? `${i + 1}. ${label(r)} — score ${r.score.toFixed(3)}` : `${i + 1}. ${label(r)}`;
-      return `${head}\n\`\`\`\n${r.text}\n\`\`\``;
+      const ctx = r.context ? `\n    ${contextLine(r.context)}` : '';
+      return `${head}${ctx}\n\`\`\`\n${r.text}\n\`\`\``;
     })
     .join('\n\n');
 }
