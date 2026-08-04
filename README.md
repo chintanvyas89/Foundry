@@ -1,8 +1,65 @@
 # Foundry — Local Semantic Code Search
 
-Offline, local-only semantic code search for VS Code + Copilot agent mode. No
-network calls at query time, no open ports, no native compilation — designed to
-run on locked-down corporate machines.
+**Search and understand your codebase by *meaning*, entirely on your machine.**
+Foundry is an offline, local-only code-intelligence layer for VS Code and Copilot
+agent mode: no network calls at query time, no open ports, no native compilation —
+built to run on locked-down corporate machines where code indexing is forbidden.
+
+## Why this exists
+
+Modern AI coding assistants are powerful, but their code understanding usually
+depends on **uploading your source to a cloud index** (`#codebase` / `@workspace`).
+Many enterprises forbid that — so they disable the workspace index and lose
+semantic search, "find where X is handled," and codebase-aware planning, keeping
+only the raw LLM.
+
+Foundry closes that gap. It builds the semantic index **on your own machine** and
+exposes it to VS Code, Copilot Chat, and agent mode — so you keep meaning-based
+search and code-aware answers **without a single line of source ever leaving your
+laptop**. Only the small snippets the model actually retrieves reach the LLM,
+exactly as they would in any normal chat turn.
+
+## What it can do
+
+| Capability | What you get |
+|---|---|
+| 🔎 **Semantic search** | Find code by *what it does*, not exact text — "where is cosine similarity computed?" Ranked hits with `file:line`, offline. |
+| 🧬 **Hybrid retrieval** | Vector ranking + a bounded full-text (FTS5) bonus, so exact identifiers the embedding misses still surface — without regressing natural-language queries. |
+| 🏷️ **Symbol lookup** | Exact/partial name search over callables *and* non-callable declarations (interfaces, enums, types, constants). |
+| 🧭 **Call graph & flow** | Trace callers/callees one level or walk multi-level execution flow; an explorable call tree you expand node-by-node in the UI. |
+| 🔗 **Usages & implementations** | "Where is X used?" and "what implements this interface?" — live via the language server, or offline from a persisted index. |
+| 🗺️ **Architecture overview** | Deterministic module-level map: modules, dependencies, entry points, and reference hotspots — no LLM, no re-index. |
+| 💬 **`@codebase` chat participant** | Ask the workspace anything inside Copilot Chat; it agentically drives the local tools and answers with grounded, clickable references. |
+| 📋 **`/plan` & `/arch` & `/graph`** | Grounded implementation plans (with change-impact blast radius), plus native Mermaid module & call-graph diagrams. |
+| 🧩 **`#foundryCodebase` LM tools** | Drop-in replacement for a disabled `#codebase` inside Copilot's own chat and agent mode. |
+| ⚡ **Lazy indexing** | Search opens in seconds — recently-edited files embed first, partial results stream while the rest indexes. |
+| 🤝 **Shareable index** | Build once, share the portable `index.db`; teammates reuse it offline with zero re-embedding. |
+
+## Why you'd want it
+
+- **🔒 Your code never leaves the machine.** No cloud upload, no open ports, no
+  network calls at query time — safe for locked-down/air-gapped setups.
+- **🧠 Keep AI code-awareness even with the cloud index disabled.** `@codebase`
+  and `#foundryCodebase` restore semantic search and codebase-aware planning
+  inside Copilot Chat.
+- **🪶 Zero-friction deploy.** Pure JS/ONNX — no native compilation, no build
+  toolchain. The extension ships with **zero runtime dependencies**.
+- **💸 Token-lean & cheap.** Compact signature results and deterministic
+  (0-model-request) `/arch` and `/graph` keep context — and cost — small.
+- **🔁 Build once, share everywhere.** The index and all code-intelligence graphs
+  are portable; teammates drop in one file and get everything offline.
+
+## Who should use this — and when
+
+| You are… | Situation | Why Foundry fits |
+|---|---|---|
+| **A dev at a security-conscious enterprise** | Copilot's cloud workspace index is banned, but the LLM is allowed | Restores semantic search + code-aware chat locally; source stays on-device |
+| **Working in an air-gapped / offline environment** | No egress to cloud indexing services | Fully offline after a one-time model download |
+| **On a large or unfamiliar codebase** | Need to find "where X is handled" and how things connect | Meaning-based search + call graph + architecture map, no manual grepping |
+| **A team lead onboarding others** | Want everyone productive without each machine re-indexing | Build the portable index once, share `index.db`, teammates reuse it instantly |
+| **Anyone who wants private, local code search** | Prefer not to send code to any third party | Local-only by design — no ports, no network at query time |
+
+---
 
 It has two parts:
 

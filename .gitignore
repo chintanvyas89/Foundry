@@ -10,3 +10,6 @@ dist/
 # Logs / OS cruft
 *.log
 .DS_Store
+
+# Internal roadmap / working notes — kept local, not published
+update.md
