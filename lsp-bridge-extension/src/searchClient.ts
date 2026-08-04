@@ -75,6 +75,27 @@ export class SearchClient {
     return Array.isArray(results) ? results : [];
   }
 
+  // Generic MCP tool passthrough — reuses the same query-only server + rpc
+  // plumbing as search()/searchSymbol(). Returns the tool's text content (what
+  // an LLM reads) plus its structuredContent (JSON, for callers that want it).
+  // Used by the chat participant and the Language Model tools to reach every
+  // MCP tool (trace_calls, find_usages, architecture_overview, …) without a
+  // second subprocess.
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ text: string; structured: unknown }> {
+    await this.ensureStarted();
+    const result = (await this.rpc('tools/call', { name, arguments: args }, 180000)) as
+      | { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown }
+      | undefined;
+    const text = (result?.content ?? [])
+      .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
+      .map((c) => c.text as string)
+      .join('\n');
+    return { text, structured: result?.structuredContent };
+  }
+
   dispose(): void {
     if (this.proc && !this.proc.killed) {
       this.proc.kill();

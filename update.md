@@ -34,6 +34,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - `structuredContent` output for non-LLM clients
 - Config + `.sweignore` excludes — `src/config.ts`, `src/ignore/ignoreMatcher.ts`
 - **No-LLM VS Code search UI**: Search-by-meaning (QuickPick), Find-similar, and a sidebar panel with a context tray, pins, refine/expand, and code-snippet cards — `lsp-bridge-extension/src/searchPanel.ts`, `searchCommands.ts`, `searchClient.ts`
+- **`@codebase` chat participant + Copilot Language Model tools**: the local index made available *inside Copilot Chat* for teams that disable Copilot's cloud workspace index. `@codebase` runs an agentic loop — the model drives our `foundry_*` tools (registered as VS Code Language Model tools over the same query-only search client) to ground answers on-device; each tool call surfaces as progress (visible retrieval plan) and answers cite files + a "Grounded via" trailer. Slash commands `/index`, `/arch`, and `/plan` (grounded implementation plan). `#foundryCodebase` is the drop-in for the disabled `#codebase` inside Copilot's own chat/agent mode. Zero runtime deps (hand-rolled on the VS Code API), read-only over `index.db` — no re-embed — `lsp-bridge-extension/src/chatParticipant.ts`, `languageModelTools.ts`, `searchClient.ts` (`callTool`)
 - LLM drill-down guidance — `.github/copilot-instructions.md`
 
 ## Partial 🟡

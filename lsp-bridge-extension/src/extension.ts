@@ -8,6 +8,8 @@ import { getReferences, getImplementations } from './references';
 import { SearchClient } from './searchClient';
 import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
+import { registerLanguageModelTools } from './languageModelTools';
+import { registerChatParticipant } from './chatParticipant';
 
 let server: net.Server | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
@@ -25,6 +27,12 @@ export function activate(context: vscode.ExtensionContext) {
   searchClient = new SearchClient(workspaceRoot, searchOutput);
   context.subscriptions.push({ dispose: () => searchClient?.dispose() });
   registerSearchCommands(context, searchClient);
+
+  // Copilot-facing surfaces over the same local index (one shared client):
+  // the foundry_* Language Model tools (incl. #foundryCodebase) and the
+  // @codebase chat participant. Both no-op gracefully on older VS Code.
+  registerLanguageModelTools(context, searchClient, searchOutput);
+  registerChatParticipant(context, searchClient, searchOutput);
 
   // Relevance-feedback drilldown panel (sidebar).
   context.subscriptions.push(

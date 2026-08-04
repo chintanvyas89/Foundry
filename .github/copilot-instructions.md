@@ -129,3 +129,13 @@ deterministic, offline aggregation of the persisted symbols/usages/call-graph
 indexes — no LLM and no re-index — so narrate its output rather than expecting
 prose from it, and build those three indexes first for full detail. Use it for
 "how is this organized / what are the main pieces / what depends on what".
+
+## When Copilot's workspace index is unavailable
+
+If this workspace's built-in semantic index / `#codebase` is disabled (common on
+locked-down setups), use **`#foundryCodebase`** to pull code context from the
+local, offline Foundry index instead — it's the drop-in replacement, backed by the
+same `semantic_search` above. The deeper `foundry_*` Language Model tools
+(`foundry_traceCalls`, `foundry_findUsages`, `foundry_architectureOverview`, …)
+expose the rest of the toolset for agent mode. There's also a `@codebase` chat
+participant that answers workspace questions by driving these tools itself.
