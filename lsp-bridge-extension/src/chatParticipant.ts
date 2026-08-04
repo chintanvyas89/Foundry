@@ -27,7 +27,9 @@ const PLAN_PREAMBLE = [
   'You are @codebase, planning an implementation change for the user’s CURRENT VS',
   'Code workspace. Workspace context is provided below: an index overview, the',
   'module architecture, the project’s own docs, the MOST RELEVANT CODE WITH FULL',
-  'BODIES, and the project’s build/test manifests. Base every claim on that context',
+  'BODIES, the CALL SITES / USAGES of the key symbols (use these to list every',
+  'file the change impacts — clients, UI, other callers — not just the definition',
+  'site), and the project’s build/test manifests. Base every claim on that context',
   'and the actual code — do not guess from memory. If a detail (a function’s',
   'determinants, a runtime mode) is not shown in the context, say so rather than',
   'inventing it. Use ONLY the build/test commands evidenced by the provided',
@@ -496,12 +498,27 @@ async function gatherPlanContext(
   if (docs) parts.push(docs);
 
   // FULL bodies of the most relevant code — the key upgrade over lean signatures.
-  await add('Most relevant code (full bodies)', 'semantic_search', {
-    query: prompt,
-    detail: 'full',
-    topK: 6,
-    context: true,
-  });
+  // Capture the structured hits so the call-site pass can trace their consumers.
+  let hits: SearchHit[] = [];
+  try {
+    const { text, structured } = await client.callTool('semantic_search', {
+      query: prompt,
+      detail: 'full',
+      topK: 6,
+      context: true,
+    });
+    if (text && text.trim()) parts.push(`#### Most relevant code (full bodies)\n${text.trim()}`);
+    const results = (structured as { results?: SearchHit[] } | undefined)?.results;
+    if (Array.isArray(results)) hits = results;
+  } catch (err) {
+    output.appendLine(`[chat/plan] semantic_search failed: ${String(err)}`);
+  }
+
+  // Call-site / impact pass: usages of the top matched symbols, so the plan
+  // covers downstream consumers (clients, UI) — not just the definition site.
+  // find_usages runs against the local bridge/index: zero model credits.
+  const callSites = await gatherCallSites(client, hits, output);
+  if (callSites) parts.push(callSites);
 
   const conventions = await gatherConventions(output);
   if (conventions) parts.push(conventions);
@@ -511,6 +528,48 @@ async function gatherPlanContext(
     'Auto-gathered workspace context for planning (read before proposing changes):\n\n' +
     parts.join('\n\n')
   );
+}
+
+// A structured hit from semantic_search (the fields we use to trace usages).
+interface SearchHit {
+  file?: string;
+  symbol?: string | null;
+  startLine?: number;
+}
+
+// Trace who consumes the top matched symbols via find_usages, so a plan accounts
+// for downstream impact (clients, UI, other call sites) rather than only the
+// definition file. Runs entirely against the local bridge/persisted index — no
+// model calls, so it adds impact coverage without extra credits.
+async function gatherCallSites(
+  client: SearchClient,
+  hits: SearchHit[],
+  output: vscode.OutputChannel,
+): Promise<string> {
+  const blocks: string[] = [];
+  const seen = new Set<string>();
+  for (const h of hits) {
+    if (blocks.length >= 3) break; // cap: top few symbols keep tokens bounded
+    if (!h || !h.symbol || !h.file || !h.startLine) continue;
+    if (seen.has(h.symbol)) continue;
+    seen.add(h.symbol);
+    try {
+      const { text } = await client.callTool('find_usages', {
+        file: h.file,
+        line: h.startLine,
+        symbol: h.symbol,
+      });
+      // Skip the "bridge/index unavailable" message and empty results.
+      if (text && text.trim() && !/unavailable/i.test(text) && !/\(none\)/.test(text)) {
+        blocks.push(`\`${h.symbol}\` (defined in ${baseName(h.file)}):\n${head(text.trim(), 1500)}`);
+      }
+    } catch (err) {
+      output.appendLine(`[chat/plan] find_usages(${h.symbol}) failed: ${String(err)}`);
+    }
+  }
+  return blocks.length
+    ? '#### Call sites / usages of key symbols (downstream impact)\n' + blocks.join('\n\n')
+    : '';
 }
 
 // Directories that never hold source worth reading — excluded from every scan.
