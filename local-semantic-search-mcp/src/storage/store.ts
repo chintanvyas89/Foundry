@@ -715,6 +715,27 @@ export class VectorStore {
     return { symbols, filesBuilt };
   }
 
+  // The tightest declaration that ENCLOSES a line — e.g. the class/interface a
+  // method lives in. Picks the symbol whose range starts before the line and
+  // ends at/after it, closest to the line (largest startLine). Returns null if
+  // the symbol table isn't built or nothing encloses the line. Used to give a
+  // search hit its structural parent.
+  getEnclosingSymbol(
+    file: string,
+    line: number,
+  ): { name: string; kind: string; startLine: number; endLine: number } | null {
+    const row = this.db
+      .prepare(
+        `SELECT name, kind, startLine, endLine FROM symbols
+           WHERE file = ? AND startLine < ? AND endLine >= ?
+           ORDER BY startLine DESC LIMIT 1`,
+      )
+      .get(file, line, line) as
+      | { name: string; kind: string; startLine: number; endLine: number }
+      | undefined;
+    return row ?? null;
+  }
+
   // Distinct declarations from the symbols table, for the usages build to ask
   // the language server about each. Pass `file` to limit to one file (used by
   // incremental usage updates). Falls back to nothing if the symbol table hasn't

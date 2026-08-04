@@ -134,11 +134,14 @@ full code, call again with `expand=[n,…]` (the result numbers — no need to r
 the query), or pass `detail="full"` for every body at once. UI clients still
 receive full code via `structuredContent`.
 
-For **execution context inline**, pass `context=true`: each hit is annotated with
-a one-line `calls: …` / `called by: …` from the persisted call graph, so an agent
-sees the flow around a result without a separate `trace_calls`. It's opt-in (a few
-extra tokens per hit) and needs the [call graph](#persisted-call-graph-optional-shareable)
-to have been built.
+For **structural context inline**, pass `context=true`: each hit is annotated with
+a one-line summary — its enclosing parent (`in ClassName`), `calls:` / `called by:`
+from the call graph, and related `tests:` — so an agent sees the flow around a
+result without a separate `trace_calls`/`find_usages`. It's opt-in (a few extra
+tokens per hit) and draws on whichever of the persisted
+[graph](#persisted-call-graph-optional-shareable) /
+[symbol](#persisted-symbol-table-optional-shareable) /
+[usages](#persisted-usages-index-optional-shareable) indexes have been built.
 
 These spawn the server in **query-only** mode (reads the index, never builds or
 modifies it), so they coexist with the Copilot-driven server on the same

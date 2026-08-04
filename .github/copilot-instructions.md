@@ -62,12 +62,13 @@ again with `expand=[n,…]` using the result NUMBERS (no need to repeat the quer
 it returns just those full bodies. Use `detail="full"` only when you genuinely
 need every result's body. This keeps context small.
 
-When you need to know how a hit fits into the execution flow — who calls it, what
-it calls — pass **`context=true`** to `semantic_search`. Each hit is then
-annotated with a one-line `calls: …` / `called by: …` drawn from the persisted
-call graph, so you get structural context inline without a separate `trace_calls`.
-It's opt-in (adds a few tokens per hit) and needs the call graph to have been
-built; leave it off for plain "where is X" lookups.
+When you need to know how a hit fits into the codebase — its enclosing type, who
+calls it, what it calls, which tests cover it — pass **`context=true`** to
+`semantic_search`. Each hit is then annotated with a one-line summary
+(`in ParentClass · calls: … · called by: … · tests: …`) drawn from the persisted
+graph/symbol/usages indexes, so you get structural context inline without separate
+`trace_calls`/`find_usages` calls. It's opt-in (adds a few tokens per hit) and uses
+whichever indexes are built; leave it off for plain "where is X" lookups.
 
 ## Drilling down
 

@@ -104,12 +104,14 @@ signature, so the model triages without whole function bodies in context.
 still get full text via `structuredContent`.
 
 **Structural context expansion — shipped (opt-in).** `context=true` annotates
-each hit with its callers/callees from the persisted call graph
-(`store.getCallers`/`getCallees`, rendered as a one-line `calls: … · called by: …`),
-so the model gets execution context in the same call — no separate `trace_calls`.
-Opt-in to stay token-lean; a no-op when the graph isn't built. Embedding-free.
-- **Still open:** fold in the enclosing parent symbol and related tests (needs the
-  standalone `symbols` table noted under #1/#2); intent detection.
+each hit with a one-line summary drawn from the persisted indexes: its enclosing
+parent (`getEnclosingSymbol`, symbol table), callers/callees (`getCallers`/
+`getCallees`, call graph), and related tests (`getUsages` filtered to test paths,
+usages index) — rendered as `in Parent · calls: … · called by: … · tests: …`. So
+the model gets structural context in the same call, no separate `trace_calls`/
+`find_usages`. Each source is used only if built; opt-in to stay token-lean.
+Embedding-free.
+- **Still open:** intent detection (route query → semantic vs symbol vs usages).
 
 ### 5. Later bets — recommended next
 Lazy indexing (Ph11), architecture summaries (Ph9), API/DB graphs (Ph6/7), visualizations (Ph15).

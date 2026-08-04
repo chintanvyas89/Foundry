@@ -76,10 +76,12 @@ export function registerSemanticSearchTool(
         .boolean()
         .optional()
         .describe(
-          'When true, annotate each hit with its callers/callees from the persisted ' +
-            'call graph (who calls it, what it calls) — execution context without a ' +
-            'second trace_calls. Needs the call graph to have been built; adds a few ' +
-            'tokens per hit, so leave off unless you want the flow around a result.',
+          'When true, annotate each hit with structural context: its enclosing parent ' +
+            '(e.g. the class a method is in), its callers/callees from the call graph, ' +
+            'and related tests — so you get the flow around a result without extra ' +
+            'trace_calls/find_usages. Draws on the built graph/symbol/usages indexes ' +
+            '(whichever exist); adds a few tokens per hit, so leave off for plain ' +
+            'lookups.',
         ),
       pinResults: z
         .array(z.number().int().positive())
@@ -204,17 +206,29 @@ export function registerSemanticSearchTool(
       }
 
       // Structural context (opt-in): annotate each hit with its callers/callees
-      // from the persisted call graph, so the model gets execution context in
-      // the same call. Keyed by the stored (workspace-relative) file + symbol —
-      // the same keys the graph was built with — so it's a cheap DB lookup, no
-      // embedder or bridge. Skipped entirely when the graph isn't built.
+      // (call graph), its enclosing parent symbol (symbol table), and related
+      // tests (usages index). All are cheap DB lookups keyed by the stored
+      // (workspace-relative) file + symbol/line — no embedder or bridge — and
+      // each source is used only if it's been built, so this degrades cleanly.
       const contextById = new Map<string, StructuralContext>();
-      if (context === true && store.graphStats().edges > 0) {
+      if (context === true) {
+        const hasGraph = store.graphStats().edges > 0;
+        const hasSymbols = store.symbolStats().symbols > 0;
+        const hasUsages = store.usageStats().refs > 0;
         for (const r of results) {
           if (!r.symbol) continue;
-          const callers = store.getCallers(r.file, r.symbol);
-          const callees = store.getCallees(r.file, r.symbol);
-          if (callers.length || callees.length) contextById.set(r.id, { callers, callees });
+          const callers = hasGraph ? store.getCallers(r.file, r.symbol) : [];
+          const callees = hasGraph ? store.getCallees(r.file, r.symbol) : [];
+          const parent = hasSymbols ? store.getEnclosingSymbol(r.file, r.startLine) : null;
+          const tests = hasUsages ? testsFor(store, r.file, r.symbol) : [];
+          if (callers.length || callees.length || parent || tests.length) {
+            contextById.set(r.id, {
+              callers,
+              callees,
+              ...(parent ? { parent } : {}),
+              ...(tests.length ? { tests } : {}),
+            });
+          }
         }
       }
 
@@ -237,12 +251,33 @@ export function registerSemanticSearchTool(
   );
 }
 
-// Callers/callees of a result, from the persisted call graph (opt-in via
-// `context`). Absent when context wasn't requested or the graph has no edges
-// for the symbol.
+// Structural context for a result (opt-in via `context`): callers/callees from
+// the call graph, the enclosing parent declaration from the symbol table, and
+// related tests from the usages index. Each field is present only when its
+// source is built and has something for the symbol.
 interface StructuralContext {
   callers: CallGraphNode[];
   callees: CallGraphNode[];
+  parent?: { name: string; kind: string; startLine: number; endLine: number };
+  tests?: string[];
+}
+
+// A reference lives in a test file if its path looks like a test/spec — used to
+// surface "related tests" for a hit from its stored usages.
+function isTestPath(rel: string): boolean {
+  return /(^|\/)(tests?|__tests__|spec|specs)(\/|$)|[._-](test|spec)\.[a-z]+$|(^|\/)(test|spec)_/i.test(
+    rel,
+  );
+}
+
+// Test references to (file, symbol) from the persisted usages index, as
+// `file:line`, deduped. Empty when usages aren't built or none are tests.
+function testsFor(store: VectorStore, file: string, symbol: string): string[] {
+  const uniq = new Set<string>();
+  for (const u of store.getUsages(file, symbol)) {
+    if (isTestPath(u.file)) uniq.add(`${u.file}:${u.line}`);
+  }
+  return [...uniq];
 }
 
 interface ResolvedResult {
@@ -291,8 +326,9 @@ function signatureOf(text: string): string {
   return nonEmpty.length > 1 ? `${clipped} …` : clipped;
 }
 
-// One-line structural-context annotation from the call graph: what the symbol
-// calls and who calls it, names deduped and capped so it stays token-lean.
+// One-line structural-context annotation: enclosing parent, what the symbol
+// calls / who calls it, and related tests — all deduped and capped so it stays
+// token-lean.
 function contextLine(ctx: StructuralContext): string {
   const names = (ns: CallGraphNode[]): string => {
     const uniq = [...new Set(ns.map((n) => n.name))];
@@ -300,8 +336,13 @@ function contextLine(ctx: StructuralContext): string {
     return uniq.length > 4 ? `${shown} +${uniq.length - 4}` : shown;
   };
   const parts: string[] = [];
+  if (ctx.parent) parts.push(`in ${ctx.parent.name}`);
   if (ctx.callees.length) parts.push(`calls: ${names(ctx.callees)}`);
   if (ctx.callers.length) parts.push(`called by: ${names(ctx.callers)}`);
+  if (ctx.tests && ctx.tests.length) {
+    const shown = ctx.tests.slice(0, 2).join(', ');
+    parts.push(`tests: ${ctx.tests.length > 2 ? `${shown} +${ctx.tests.length - 2}` : shown}`);
+  }
   return parts.join('  ·  ');
 }
 
