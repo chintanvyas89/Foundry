@@ -7,6 +7,12 @@ const configSchema = z.object({
   dtype: z.string().default('q8'),
   topKDefault: z.number().int().positive().default(8),
   maxChunkTokens: z.number().int().positive().default(512),
+  // Lazy indexing: embed recently-modified files first, open search as soon as
+  // that hot set is ready, and stream the rest in the background. Set false to
+  // block search until the whole workspace is embedded (the pre-lazy behavior).
+  lazyIndex: z.boolean().default(true),
+  // How many (most-recently-modified) files to embed before search opens.
+  lazyHotSet: z.number().int().positive().default(64),
   // Extra ignore patterns (gitignore syntax) applied on top of .gitignore,
   // .sweignore, and the built-in defaults. A convenient place to exclude
   // folders without a separate .sweignore file, e.g. ["tests/", "vendor/"].

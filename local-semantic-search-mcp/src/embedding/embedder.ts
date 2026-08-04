@@ -35,25 +35,82 @@ export function initEmbedder(config: Config): Promise<FeatureExtractionPipeline>
 // to bound peak memory and sequence-padding waste on long chunks.
 const EMBED_BATCH_SIZE = 16;
 
+// ---- Priority scheduler ---------------------------------------------------
+// There is ONE ONNX pipeline and it saturates every core, so two embed calls
+// running at once would contend. We funnel all embedding through a single
+// serialized runner with two FIFO queues: a user's SEARCH-query embed ('high')
+// always jumps ahead of the background index build ('low'). Because callers
+// enqueue one ≤EMBED_BATCH_SIZE sub-batch at a time and the runner yields the
+// event loop between sub-batches, a query submitted mid-build waits at most one
+// sub-batch (~tens of ms), never the whole remaining build.
+export type EmbedPriority = 'high' | 'low';
+
+interface EmbedTask {
+  texts: string[]; // already ≤ EMBED_BATCH_SIZE
+  resolve: (v: Float32Array[]) => void;
+  reject: (e: unknown) => void;
+}
+
+const highQueue: EmbedTask[] = [];
+const lowQueue: EmbedTask[] = [];
+let draining = false;
+
+function sliceVectors(output: { dims: number[]; data: Float32Array }, rows: number): Float32Array[] {
+  const dims = output.dims as number[];
+  const dim = dims[dims.length - 1];
+  const data = output.data as Float32Array;
+  const out: Float32Array[] = [];
+  for (let r = 0; r < rows; r++) {
+    // .slice copies, so each vector owns its own backing buffer.
+    out.push(new Float32Array(data.slice(r * dim, (r + 1) * dim)));
+  }
+  return out;
+}
+
+async function drain(): Promise<void> {
+  if (draining) return;
+  draining = true;
+  try {
+    const extractor = await extractorPromise!;
+    while (highQueue.length > 0 || lowQueue.length > 0) {
+      const task = highQueue.shift() ?? lowQueue.shift()!;
+      try {
+        const output = await extractor(task.texts, { pooling: 'mean', normalize: true });
+        task.resolve(sliceVectors(output as { dims: number[]; data: Float32Array }, task.texts.length));
+      } catch (err) {
+        task.reject(err);
+      }
+      // Yield so a high-priority query that arrived mid-batch is picked next.
+      await new Promise((r) => setImmediate(r));
+    }
+  } finally {
+    draining = false;
+  }
+}
+
+function schedule(texts: string[], priority: EmbedPriority): Promise<Float32Array[]> {
+  return new Promise<Float32Array[]>((resolve, reject) => {
+    (priority === 'high' ? highQueue : lowQueue).push({ texts, resolve, reject });
+    void drain();
+  });
+}
+
 // Embed many texts at once. A single model call over a batch is meaningfully
-// faster per chunk than one call each, which is what the indexer relies on
-// for the initial build.
-export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
+// faster per chunk than one call each, which is what the indexer relies on for
+// the build. `priority` defaults to 'high' (search queries); the background
+// index build passes 'low' so it yields to queries.
+export async function embedBatch(
+  texts: string[],
+  opts?: { priority?: EmbedPriority },
+): Promise<Float32Array[]> {
   if (!extractorPromise) {
     throw new Error('Embedder not initialized — call initEmbedder(config) at startup first.');
   }
-  const extractor = await extractorPromise;
+  const priority = opts?.priority ?? 'high';
   const out: Float32Array[] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
-    const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
-    const output = await extractor(batch, { pooling: 'mean', normalize: true });
-    const dims = output.dims as number[];
-    const dim = dims[dims.length - 1];
-    const data = output.data as Float32Array;
-    for (let r = 0; r < batch.length; r++) {
-      // .slice copies, so each vector owns its own backing buffer.
-      out.push(new Float32Array(data.slice(r * dim, (r + 1) * dim)));
-    }
+    const sub = texts.slice(i, i + EMBED_BATCH_SIZE);
+    out.push(...(await schedule(sub, priority)));
   }
   return out;
 }

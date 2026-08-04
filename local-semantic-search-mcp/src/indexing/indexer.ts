@@ -29,6 +29,13 @@ export interface BuildProgress {
   skippedFiles: number; // files skipped as unchanged so far
 }
 
+export interface BuildOptions {
+  onProgress?: (p: BuildProgress) => void;
+  lazy?: boolean; // open search after the hot set instead of the whole repo
+  hotSet?: number; // files to embed before firing onSearchable (lazy only)
+  onSearchable?: () => void; // fired once search can return useful results
+}
+
 export class Indexer {
   constructor(
     private workspaceRoot: string,
@@ -45,9 +52,18 @@ export class Indexer {
   // onProgress is called once before the loop (done=0, so the total is known
   // immediately) and after each file. The caller decides how often to actually
   // log — reporting every file keeps the indexer decoupled from output policy.
-  async buildFull(onProgress?: (p: BuildProgress) => void): Promise<BuildStats> {
+  //
+  // Lazy indexing: files are embedded most-recently-modified first (the hot set),
+  // and `onSearchable` fires once the first `hotSet` files are done so the caller
+  // can open search while the rest streams in. When `lazy` is false, `onSearchable`
+  // fires only after the whole workspace is embedded (block-until-complete).
+  async buildFull(opts: BuildOptions = {}): Promise<BuildStats> {
+    const { onProgress, lazy = false, hotSet = 64, onSearchable } = opts;
     const ig = buildIgnoreMatcher(this.workspaceRoot, this.excludePatterns);
-    const files = this.walk(this.workspaceRoot, ig);
+    // Most-recently-modified first, so the developer's active area indexes first.
+    const files = this.walk(this.workspaceRoot, ig)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .map((f) => f.path);
     const total = files.length;
     const stats: BuildStats = {
       files: total,
@@ -57,7 +73,16 @@ export class Indexer {
       prunedFiles: 0,
     };
     const seen = new Set<string>();
+    let searchableFired = false;
+    const fireSearchable = (): void => {
+      if (!searchableFired) {
+        searchableFired = true;
+        onSearchable?.();
+      }
+    };
+
     onProgress?.({ done: 0, total, chunks: 0, embedded: 0, skippedFiles: 0 });
+    const hotCount = Math.min(hotSet, total);
     for (let i = 0; i < total; i++) {
       seen.add(this.toRel(files[i]));
       const r = await this.indexFile(files[i]);
@@ -71,7 +96,10 @@ export class Indexer {
         embedded: stats.embedded,
         skippedFiles: stats.skippedFiles,
       });
+      if (lazy && i + 1 >= hotCount) fireSearchable();
     }
+    // Non-lazy (or empty repo): search opens only now, once everything is done.
+    fireSearchable();
     // Remove index entries for files that no longer exist / are now ignored.
     // Runs at the end of a full walk, when `seen` is the authoritative set of
     // files currently in the workspace.
@@ -125,7 +153,12 @@ export class Indexer {
     }
 
     if (toEmbed.length > 0) {
-      const embeddings = await embedBatch(toEmbed.map((i) => chunks[i].text));
+      // All indexer embedding is background work — 'low' priority so a live
+      // search query's embed always jumps ahead of the build.
+      const embeddings = await embedBatch(
+        toEmbed.map((i) => chunks[i].text),
+        { priority: 'low' },
+      );
       for (let j = 0; j < toEmbed.length; j++) {
         const i = toEmbed[j];
         const c = chunks[i];
@@ -150,8 +183,8 @@ export class Indexer {
     this.store.deleteFileHash(relPath);
   }
 
-  private walk(dir: string, ig: Ignore): string[] {
-    const results: string[] = [];
+  private walk(dir: string, ig: Ignore): Array<{ path: string; mtimeMs: number }> {
+    const results: Array<{ path: string; mtimeMs: number }> = [];
     for (const entry of readdirSync(dir)) {
       const full = join(dir, entry);
       if (isIgnored(ig, this.workspaceRoot, full)) continue;
@@ -159,7 +192,7 @@ export class Indexer {
       if (stat.isDirectory()) {
         results.push(...this.walk(full, ig));
       } else if (stat.isFile()) {
-        results.push(full);
+        results.push({ path: full, mtimeMs: stat.mtimeMs });
       }
     }
     return results;

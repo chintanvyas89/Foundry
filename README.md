@@ -72,9 +72,13 @@ Then in VS Code:
 3. Ask something like *"find where cosine similarity is computed."*
 
 > Requires a recent VS Code (~1.99+) with Copilot agent mode. The first index
-> build runs in the background after the server starts — a query made during
-> that window waits for it to finish. Subsequent restarts are near-instant
-> (unchanged files are skipped).
+> build runs in the background after the server starts. Thanks to **lazy
+> indexing**, search opens within seconds — recently-modified files are embedded
+> first, then `semantic_search` returns partial results (marked *"index N%
+> building"*) while the rest streams in. Set `lazyIndex: false` in
+> `.swe-search.config.json` to block until the whole workspace is embedded, and
+> `lazyHotSet` to tune how many files open search. Subsequent restarts are
+> near-instant (unchanged files are skipped — no re-embed).
 
 ### 3. (Optional) Install the VS Code extension
 

@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { embed } from '../embedding/embedder.js';
+import { indexState } from '../indexing/indexState.js';
 import type { VectorStore, CallGraphNode } from '../storage/store.js';
 import { blend } from '../storage/similarity.js';
 import type { Config } from '../config.js';
@@ -198,10 +199,22 @@ export function registerSemanticSearchTool(
       // Remember this result set so a follow-up call can pin by result number.
       lastResultIds = results.map((r) => r.id);
 
+      // Lazy indexing: search opens as soon as the hot set is embedded, so an
+      // early query may see a partial index. Surface that so the caller knows
+      // results can be incomplete (and knows to re-run once it finishes).
+      const idx = indexingStatus();
+
       if (results.length === 0) {
         return {
-          content: [{ type: 'text', text: 'No matching code found.' }],
-          structuredContent: { results: [] },
+          content: [
+            {
+              type: 'text',
+              text:
+                (idx?.note ?? '') +
+                (idx ? 'No matches yet — the index is still building.' : 'No matching code found.'),
+            },
+          ],
+          structuredContent: { results: [], ...(idx ? { indexing: idx.indexing } : {}) },
         };
       }
 
@@ -246,9 +259,26 @@ export function registerSemanticSearchTool(
 
       // `content` is what an LLM reads; `structuredContent` is the same result
       // set as machine-readable JSON for non-LLM UI clients.
-      return { content: [{ type: 'text', text }], structuredContent: { results: resolved } };
+      return {
+        content: [{ type: 'text', text: (idx?.note ?? '') + text }],
+        structuredContent: { results: resolved, ...(idx ? { indexing: idx.indexing } : {}) },
+      };
     },
   );
+}
+
+// While the background embedding pass is running (lazy indexing), return a note
+// to prepend to results and an `indexing` payload for structured clients.
+// Returns null once the index is complete.
+function indexingStatus(): { note: string; indexing: { building: boolean; percent: number } } | null {
+  const s = indexState.status();
+  if (!s.building) return null;
+  return {
+    note:
+      `⏳ Index still building — ${s.percent}% of files embedded; results may be ` +
+      'incomplete, re-run shortly for full coverage.\n\n',
+    indexing: { building: true, percent: s.percent },
+  };
 }
 
 // Structural context for a result (opt-in via `context`): callers/callees from

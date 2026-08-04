@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { VectorStore } from '../storage/store.js';
+import { indexState } from '../indexing/indexState.js';
 
 // A cheap, offline orientation summary of the indexed workspace — file/chunk
 // counts, a language breakdown, and which of the optional indexes (symbols,
@@ -27,9 +28,15 @@ export function registerRepoOverviewTool(server: McpServer, store: VectorStore):
       const built = (n: number, filesBuilt: number, label: string): string =>
         filesBuilt === 0 ? `${label}: not built` : `${label}: ${n} (${filesBuilt} files scanned)`;
 
+      const idx = indexState.status();
+      const indexing = idx.building
+        ? `building (${idx.percent}% — ${idx.filesDone}/${idx.filesTotal} files)`
+        : 'complete';
+
       const text = [
         `Workspace index overview:`,
         `- ${r.files} files indexed, ${r.chunks} chunks`,
+        `- indexing: ${indexing}`,
         `- languages (by extension): ${langs || '(none)'}`,
         `- ${built(s.symbols, s.filesBuilt, 'symbols')}`,
         `- ${built(g.edges, g.filesBuilt, 'call graph edges')}`,
@@ -42,6 +49,7 @@ export function registerRepoOverviewTool(server: McpServer, store: VectorStore):
         structuredContent: {
           files: r.files,
           chunks: r.chunks,
+          indexing: { building: idx.building, percent: idx.percent },
           languages: r.languages,
           symbols: s.symbols,
           edges: g.edges,

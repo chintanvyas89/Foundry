@@ -8,6 +8,7 @@ import { initEmbedder } from './embedding/embedder.js';
 import { VectorStore } from './storage/store.js';
 import { Indexer } from './indexing/indexer.js';
 import { startWatcher } from './indexing/watcher.js';
+import { indexState } from './indexing/indexState.js';
 import { buildCallGraph, updateFileGraph } from './indexing/graphBuilder.js';
 import { buildSymbols, updateFileSymbols } from './indexing/symbolBuilder.js';
 import { buildUsages, updateFileUsages } from './indexing/usageBuilder.js';
@@ -82,8 +83,12 @@ async function main() {
 
     // Only the lock holder mutates the store — everyone else stops here.
     // The embedder is still loaded above so this instance can embed search
-    // queries against the shared read-only view of the index.
-    if (!holdsIndexLock) return;
+    // queries against the shared read-only view of the index. Open search
+    // immediately against the existing index (there's no build to wait for).
+    if (!holdsIndexLock) {
+      indexState.markSearchable();
+      return;
+    }
 
     // Reject a stored index built with a different model/dtype (or a legacy
     // absolute-path index from before this version) — its vectors/paths aren't
@@ -99,7 +104,17 @@ async function main() {
     console.error('[swe-search] building initial index...');
     const startAt = Date.now();
     let lastLog = 0;
-    const { files, chunks, embedded, skippedFiles, prunedFiles } = await indexer.buildFull((p) => {
+    const onSearchable = () => {
+      if (config.lazyIndex && indexState.building) {
+        console.error('[swe-search] search is now open (hot set embedded) — indexing continues in the background');
+      }
+      indexState.markSearchable();
+    };
+    const { files, chunks, embedded, skippedFiles, prunedFiles } = await indexer.buildFull({
+      lazy: config.lazyIndex,
+      hotSet: config.lazyHotSet,
+      onSearchable,
+      onProgress: (p) => {
       const now = Date.now();
       const isLast = p.done === p.total;
       // The first callback (done=0) fires right after the walk, before any
@@ -107,12 +122,14 @@ async function main() {
       // (missing excludes, unignored generated dirs) is visible up front
       // instead of buried in throttled progress updates.
       if (p.done === 0) {
+        indexState.beginBuild(p.total);
         lastLog = now;
         console.error(
           `[swe-search] walked ${p.total} files under ignore rules — starting embedding pass`,
         );
         return;
       }
+      indexState.progress(p.done);
 
       // Throttle to ~1 line/sec so a large repo doesn't flood the Output tab,
       // but always emit the very last update.
@@ -126,7 +143,9 @@ async function main() {
             `${p.chunks} chunks (${p.embedded} embedded, ${p.skippedFiles} unchanged) — ${elapsed}s`,
         );
       }
+      },
     });
+    indexState.finishBuild();
     console.error(
       `[swe-search] index ready: ${chunks} chunks across ${files} files ` +
         `(${embedded} embedded this run, ${skippedFiles} files unchanged & skipped, ${prunedFiles} stale files pruned)`,
@@ -177,7 +196,11 @@ async function main() {
     startWatcher(workspaceRoot, indexer, config.exclude, onFileIndexed);
     console.error('[swe-search] incremental watch active');
   })();
-  ready.catch((err) => console.error('[swe-search] background init failed:', err));
+  ready.catch((err) => {
+    console.error('[swe-search] background init failed:', err);
+    // Unblock the search gate with the error instead of hanging forever.
+    indexState.failInit(err);
+  });
 
   // Explicit one-time index builds — all opt-in, DETACHED (never inside `ready`,
   // which gates search, so a long LSP pass doesn't block queries), and
@@ -225,7 +248,9 @@ async function main() {
   const selected = builds.filter((b) => buildAll || process.env[b.flag] === '1');
   if (holdsIndexLock && selected.length > 0) {
     void (async () => {
-      await ready;
+      // Wait for the WHOLE embedding pass (not just `searchable`) so these
+      // passes iterate the complete file/symbol set, not a partial hot set.
+      await indexState.indexComplete;
       if (buildAll) {
         console.error(
           '[swe-search] build-all: symbols → call graph → usages → implementations ' +
@@ -269,7 +294,9 @@ async function main() {
     })().catch((err) => console.error('[swe-search] index build failed:', err));
   }
 
-  registerSemanticSearchTool(server, store, config, workspaceRoot, ready);
+  // Search gates on `searchable` (embedder loaded + hot set embedded), not the
+  // full build — so on a fresh repo it opens in seconds and streams the rest.
+  registerSemanticSearchTool(server, store, config, workspaceRoot, indexState.searchable);
   // Symbol-name lookup over the stored index — no embedder needed, so no `ready`
   // gate; returns whatever is already indexed.
   registerSearchSymbolTool(server, store, config, workspaceRoot);
