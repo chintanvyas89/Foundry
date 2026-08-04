@@ -43,11 +43,14 @@ This is faster and uses far less context than scanning the codebase file by file
 
 ## Looking up a known symbol
 
-When you already know the exact identifier — a specific function, class, or method
-name like `VectorStore` or `getUserById` — use **search_symbol** (a direct
+When you already know the exact identifier — a specific function, class, method,
+or a non-callable declaration like an interface/enum/type/constant name (e.g.
+`VectorStore`, `getUserById`, `CallGraphNode`) — use **search_symbol** (a direct
 name lookup, ranked exact > prefix > substring) instead of semantic_search, which
-is weaker at exact names. Use semantic_search when you know *what the code does*
-but not what it's called; use search_symbol when you know the name.
+is weaker at exact names. It covers callables (with their code) and, once the
+symbol table is built, non-callable declarations (shown with their kind and
+location). Use semantic_search when you know *what the code does* but not what
+it's called; use search_symbol when you know the name.
 
 ## Reading results efficiently
 

@@ -4,6 +4,19 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { VectorStore } from '../storage/store.js';
 import type { Config } from '../config.js';
 
+// A merged symbol match: from the chunk index (has `text`/`id`), the standalone
+// symbols table (has `kind`), or both.
+interface SymbolHit {
+  id?: string;
+  file: string;
+  symbol: string;
+  kind?: string;
+  startLine: number;
+  endLine: number;
+  text?: string;
+  score: number;
+}
+
 // Exact/partial symbol-NAME lookup — the complement to semantic_search. Purely
 // local over the stored index (no embedder, no bridge), so it works instantly
 // and offline. Ranks exact > prefix > substring.
@@ -15,11 +28,14 @@ export function registerSearchSymbolTool(
 ): void {
   server.tool(
     'search_symbol',
-    'Find a function/class/method by NAME (exact or partial) — not by meaning. Use ' +
-      'this when you already know the identifier, e.g. "getUserById" or "VectorStore", ' +
-      'where semantic_search (meaning-based) is weaker. Returns matching symbols ranked ' +
-      'exact > prefix > substring, each with its file:line and code. For "what does X ' +
-      'do" or "where is Y handled", prefer semantic_search.',
+    'Find a symbol by NAME (exact or partial) — not by meaning. Use this when you ' +
+      'already know the identifier, e.g. "getUserById", "VectorStore", or an ' +
+      'interface/enum/type/constant name, where semantic_search (meaning-based) is ' +
+      'weaker. Covers callables (with their code) AND non-callable declarations ' +
+      '(interfaces, enums, type aliases, constants) once the symbol table is built. ' +
+      'Returns matches ranked exact > prefix > substring, each with its file:line, ' +
+      'kind, and (for callables) code. For "what does X do" or "where is Y handled", ' +
+      'prefer semantic_search.',
     {
       name: z
         .string()
@@ -28,13 +44,48 @@ export function registerSearchSymbolTool(
     },
     async ({ name, limit }) => {
       const q = name.trim().toLowerCase();
-      const ranked = store
-        .searchSymbols(name.trim())
-        .map((r) => {
-          const s = r.symbol.toLowerCase();
-          const score = s === q ? 1 : s.startsWith(q) ? 0.9 : 0.75;
-          return { ...r, score };
-        })
+      const scoreOf = (n: string): number => {
+        const s = n.toLowerCase();
+        return s === q ? 1 : s.startsWith(q) ? 0.9 : 0.75;
+      };
+
+      // Union two sources, keyed by name+file+line so a symbol present in both is
+      // merged (not duplicated): chunk symbols carry the code body; the standalone
+      // symbols table carries the kind and the non-callable declarations that
+      // never became chunks. The table may be empty (not built) — then this is
+      // exactly the old chunk-only behaviour.
+      const key = (file: string, sym: string, line: number): string => `${sym}|${file}|${line}`;
+      const byKey = new Map<string, SymbolHit>();
+
+      for (const r of store.searchSymbols(name.trim())) {
+        byKey.set(key(r.file, r.symbol, r.startLine), {
+          id: r.id,
+          file: r.file,
+          symbol: r.symbol,
+          startLine: r.startLine,
+          endLine: r.endLine,
+          text: r.text,
+          score: scoreOf(r.symbol),
+        });
+      }
+      for (const r of store.searchSymbolsTable(name.trim())) {
+        const k = key(r.file, r.name, r.startLine);
+        const existing = byKey.get(k);
+        if (existing) {
+          existing.kind = r.kind; // annotate the callable chunk with its kind
+        } else {
+          byKey.set(k, {
+            file: r.file,
+            symbol: r.name,
+            kind: r.kind,
+            startLine: r.startLine,
+            endLine: r.endLine,
+            score: scoreOf(r.name),
+          });
+        }
+      }
+
+      const ranked = [...byKey.values()]
         .sort((a, b) => b.score - a.score || a.symbol.length - b.symbol.length)
         .slice(0, limit ?? config.topKDefault);
 
@@ -45,22 +96,26 @@ export function registerSearchSymbolTool(
         };
       }
 
-      // Same result shape as semantic_search so UI clients can reuse it.
+      // Same result shape as semantic_search so UI clients can reuse it; `kind`
+      // is added, and `text` may be absent for non-callable declarations.
       const resolved = ranked.map((r) => ({
-        id: r.id,
+        id: r.id ?? null,
         file: join(workspaceRoot, r.file),
         symbol: r.symbol,
+        kind: r.kind ?? null,
         startLine: r.startLine,
         endLine: r.endLine,
         score: r.score,
-        text: r.text,
+        text: r.text ?? null,
       }));
 
       const text = resolved
-        .map(
-          (r, i) =>
-            `${i + 1}. ${r.symbol} (${r.file}:${r.startLine}-${r.endLine})\n\`\`\`\n${r.text}\n\`\`\``,
-        )
+        .map((r, i) => {
+          const head = `${i + 1}. ${r.symbol} (${r.file}:${r.startLine}-${r.endLine})${r.kind ? ` — ${r.kind}` : ''}`;
+          // Callable hits carry code; non-callable declarations show location +
+          // kind only (open the file at the line for detail).
+          return r.text ? `${head}\n\`\`\`\n${r.text}\n\`\`\`` : head;
+        })
         .join('\n\n');
 
       return { content: [{ type: 'text', text }], structuredContent: { results: resolved } };

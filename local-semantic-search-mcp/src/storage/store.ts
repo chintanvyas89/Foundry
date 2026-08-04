@@ -76,6 +76,30 @@ CREATE TABLE IF NOT EXISTS graph_files (
 );
 `;
 
+// Standalone symbol index. Populated from the LSP bridge's document symbols by
+// an explicit one-time build pass (SWE_BUILD_SYMBOLS) — embedding-free, and kept
+// entirely separate from chunking so it can carry NON-CALLABLE kinds
+// (interfaces, enums, type aliases, constants, …) that never became chunks.
+// `search_symbol` unions this with the callable symbols already on `chunks`.
+// Paths are workspace-relative, so the table rides inside a shared `index.db`.
+// `symbol_files` tracks which files have been scanned (same fileHash as `files`)
+// for a resumable/incremental build.
+const SYMBOL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS symbols (
+  file TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  startLine INTEGER NOT NULL,
+  endLine INTEGER NOT NULL,
+  PRIMARY KEY (file, name, kind, startLine)
+);
+CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+CREATE TABLE IF NOT EXISTS symbol_files (
+  path TEXT PRIMARY KEY,
+  fileHash TEXT NOT NULL
+);
+`;
+
 // Paths in `chunks.file` / `chunks.id` / `files.path` are stored RELATIVE to
 // the workspace root (forward-slash separated). That keeps the index portable
 // between machines/checkouts, so it can be shared without every dev re-indexing.
@@ -104,6 +128,7 @@ export class VectorStore {
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
     this.db.exec(SCHEMA);
     this.db.exec(EDGE_SCHEMA);
+    this.db.exec(SYMBOL_SCHEMA);
     try {
       this.db.exec(FTS_SCHEMA);
       this.ftsEnabled = true;
@@ -256,6 +281,8 @@ export class VectorStore {
         this.deleteFileHash(path);
         this.deleteEdgesByViaFile(path);
         this.deleteGraphFile(path);
+        this.deleteSymbolsByFile(path);
+        this.deleteSymbolFile(path);
         pruned++;
       }
     }
@@ -577,6 +604,89 @@ export class VectorStore {
     return { edges, filesBuilt };
   }
 
+  // ---- Standalone symbols (embedding-free) ----------------------------------
+
+  // Every indexed file (workspace-relative path), so the symbol build can scan
+  // each one — unlike the call graph, symbols aren't limited to files that
+  // produced callable chunks.
+  listIndexedFiles(): string[] {
+    const rows = this.db.prepare('SELECT path FROM files ORDER BY path').all() as Array<{
+      path: string;
+    }>;
+    return rows.map((r) => r.path);
+  }
+
+  // Replace a file's symbols. Delete-then-insert in one transaction so a rescan
+  // leaves no stale rows; INSERT OR IGNORE tolerates duplicate declarations
+  // (same name+kind+line) a provider might report.
+  upsertSymbols(file: string, symbols: SymbolRow[]): void {
+    const del = this.db.prepare('DELETE FROM symbols WHERE file = ?');
+    const ins = this.db.prepare(
+      'INSERT OR IGNORE INTO symbols (file, name, kind, startLine, endLine) VALUES (?, ?, ?, ?, ?)',
+    );
+    this.db.exec('BEGIN');
+    try {
+      del.run(file);
+      for (const s of symbols) ins.run(file, s.name, s.kind, s.startLine, s.endLine);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  deleteSymbolsByFile(file: string): void {
+    this.db.prepare('DELETE FROM symbols WHERE file = ?').run(file);
+  }
+
+  // Name-based lookup over the standalone symbols table (all kinds). Case-
+  // insensitive substring; LIKE wildcards in the fragment are escaped so it
+  // matches literally. Complements searchSymbols (which is chunk/callable-only).
+  searchSymbolsTable(
+    fragment: string,
+    limit = 50,
+  ): Array<{ file: string; name: string; kind: string; startLine: number; endLine: number }> {
+    const escaped = fragment.replace(/[\\%_]/g, (m) => `\\${m}`);
+    const rows = this.db
+      .prepare(
+        `SELECT file, name, kind, startLine, endLine FROM symbols
+           WHERE name LIKE ? ESCAPE '\\' LIMIT ?`,
+      )
+      .all(`%${escaped}%`, limit) as Array<{
+      file: string;
+      name: string;
+      kind: string;
+      startLine: number;
+      endLine: number;
+    }>;
+    return rows;
+  }
+
+  getSymbolFileHash(file: string): string | null {
+    const row = this.db.prepare('SELECT fileHash FROM symbol_files WHERE path = ?').get(file) as
+      | { fileHash: string }
+      | undefined;
+    return row?.fileHash ?? null;
+  }
+
+  setSymbolFileHash(file: string, hash: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO symbol_files (path, fileHash) VALUES (?, ?)')
+      .run(file, hash);
+  }
+
+  deleteSymbolFile(file: string): void {
+    this.db.prepare('DELETE FROM symbol_files WHERE path = ?').run(file);
+  }
+
+  // Symbol count + how many files have been scanned — for build progress and to
+  // tell whether the symbol table has been populated at all.
+  symbolStats(): { symbols: number; filesBuilt: number } {
+    const symbols = (this.db.prepare('SELECT COUNT(*) AS c FROM symbols').get() as { c: number }).c;
+    const filesBuilt = (this.db.prepare('SELECT COUNT(*) AS c FROM symbol_files').get() as { c: number }).c;
+    return { symbols, filesBuilt };
+  }
+
   close(): void {
     this.db.close();
   }
@@ -588,6 +698,15 @@ export interface CallGraphNode {
   file: string;
   line: number;
   name: string;
+}
+
+// A declaration in the standalone symbols table (see SYMBOL_SCHEMA). `file` is
+// workspace-relative; `kind` is the LSP SymbolKind name (Interface, Enum, …).
+export interface SymbolRow {
+  name: string;
+  kind: string;
+  startLine: number;
+  endLine: number;
 }
 
 // A directed caller -> callee edge, tagged with the file whose symbol produced

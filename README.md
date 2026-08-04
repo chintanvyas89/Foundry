@@ -80,10 +80,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.6.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.6.0.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.7.0.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.7.0.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.6.0.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.7.0.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -108,9 +108,11 @@ absolute node path if VS Code can't find `node`). Then:
   language server.
 
 For Copilot, the server exposes six MCP tools: **`semantic_search`** (by
-meaning), **`search_symbol`** (exact/partial name), **`trace_calls`** (call
-graph, one level), **`show_execution_flow`** (multi-level call-graph walk),
-**`find_usages`** (references), and **`find_implementations`** (of an interface).
+meaning), **`search_symbol`** (exact/partial name — callables *and* non-callable
+declarations like interfaces/enums/types once the symbol table is built),
+**`trace_calls`** (call graph, one level), **`show_execution_flow`** (multi-level
+call-graph walk), **`find_usages`** (references), and **`find_implementations`**
+(of an interface).
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
@@ -166,6 +168,24 @@ Because edges use workspace-relative paths, the graph rides inside the shared
 **offline — no bridge or language server needed**. `trace_calls` automatically
 uses the persisted graph whenever the live bridge isn't running (pass the symbol
 name so it can look the entry up).
+
+### Persisted symbol table (optional, shareable)
+
+`search_symbol` covers callables out of the box (from the chunk index). To also
+find **non-callable declarations** — interfaces, enums, type aliases, constants —
+build the standalone symbol table once, the same way as the call graph. With
+VS Code open and the extension active:
+
+```bash
+SWE_BUILD_SYMBOLS=1 node local-semantic-search-mcp/dist/index.js
+```
+
+It walks the language server's document symbols (all kinds) for every indexed
+file and stores them in a `symbols` table inside `index.db`. Like the graph build
+it **runs detached**, is **resumable + incremental**, rides in the shared
+`index.db` (works offline for teammates), and is **not a re-embed** — vectors are
+untouched. Once built, `search_symbol` unions these with the callable symbols and
+labels each hit with its kind.
 
 **LSP bridge (better chunks).** With the extension running, the status bar shows
 **`LSP Bridge: listening`** — the server then chunks on real editor symbols

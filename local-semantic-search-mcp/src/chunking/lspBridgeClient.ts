@@ -149,6 +149,18 @@ export async function getSymbolsViaBridge(
   return msg ? (msg.symbols ?? []) : null;
 }
 
+// All indexable declaration kinds in a file (interfaces, enums, consts, types,
+// … as well as callables) for the standalone symbols table. Separate bridge
+// message from getSymbolsViaBridge, which stays chunking-only. Returns null when
+// the bridge isn't reachable.
+export async function getAllSymbolsViaBridge(
+  workspaceRoot: string,
+  filePath: string,
+): Promise<BridgeSymbol[] | null> {
+  const msg = await sendRequest(workspaceRoot, { type: 'allSymbols', file: filePath });
+  return msg ? (msg.symbols ?? []) : null;
+}
+
 // Call hierarchy for the symbol at (file, line). Returns null when the bridge
 // isn't reachable; returns a result with `root: null` when the language server
 // has no call-hierarchy for that position.

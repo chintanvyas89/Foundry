@@ -1,6 +1,6 @@
 # Foundry — status & roadmap
 
-_Last updated: 2026-08-03_
+_Last updated: 2026-08-04_
 
 Foundry today is a **local, offline semantic code search** system for VS Code: an
 MCP server that indexes a repo into embeddings (in-process ONNX, SQLite) and
@@ -37,7 +37,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 
 ## Partial 🟡
 - **Repo metadata (Ph1):** `files(path, fileHash)` only — no `repositories` table, language/size/mtime columns, or language detection.
-- **LSP symbols (Ph2):** callable symbols are queryable via `search_symbol` (over `chunks.symbol`) and the persisted call graph; still no standalone `symbols` table for non-callable kinds (interfaces/enums/consts) — `src/chunking/lspBridgeClient.ts`.
+- **LSP symbols (Ph2):** callable symbols are queryable via `search_symbol` (over `chunks.symbol`) and the persisted call graph; a standalone `symbols` table now also covers **non-callable kinds** (interfaces/enums/consts/types) via an opt-in `SWE_BUILD_SYMBOLS` pass — `src/indexing/symbolBuilder.ts`, `store.symbols`. Still partial: no `chunk_symbol_mapping` join table.
 - **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
 - **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback + compact/expand token control; call-graph context is now folded into retrieval opt-in (`context=true` annotates each hit with callers/callees); still open: enclosing-parent/test context and intent detection.
 - **MCP tools (Ph13):** 6 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `show_execution_flow`, `find_usages`, `find_implementations`).
@@ -68,11 +68,14 @@ is down.
   cross-language, or data flow (semantic search stays the complement).
 
 ### ✅ 2. Symbol tools (Ph2/3) — shipped
-`search_symbol` (name lookup over indexed chunk symbols), `find_usages`, and
-`find_implementations` (references/implementations via the bridge). The persisted
-`call_edges` table (see #1) now covers whole-repo caller/callee relationships
-offline. **Still open:** a standalone `symbols` table for non-callable kinds
-(interfaces/enums/consts) and persisted `find_usages` results.
+`search_symbol` (name lookup over indexed chunk symbols **plus** the standalone
+`symbols` table), `find_usages`, and `find_implementations` (references/
+implementations via the bridge). The persisted `call_edges` table (see #1) covers
+whole-repo caller/callee relationships offline, and the standalone **`symbols`
+table** (`SWE_BUILD_SYMBOLS`, `src/indexing/symbolBuilder.ts`) now adds
+non-callable kinds (interfaces/enums/consts/types) — embedding-free, shareable in
+`index.db`, incremental via the watcher. **Still open:** persisted `find_usages`
+results (offline references).
 
 ### ✅ 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10) — shipped
 `semantic_search` now fuses semantic (cosine) ranking with a **bounded FTS5
@@ -109,7 +112,7 @@ Opt-in to stay token-lean; a no-op when the graph isn't built. Embedding-free.
 Lazy indexing (Ph11), architecture summaries (Ph9), API/DB graphs (Ph6/7), visualizations (Ph15).
 
 ## Known limitations
-- No call graph yet (see Next up #1).
+- Call graph and symbol table are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS`); until built, `trace_calls`/`show_execution_flow` need the live bridge and `search_symbol` covers callables only.
 - Semantic search **can't do data flow**, and only *suggests candidates* for dynamic dispatch / cross-language boundaries — verify before trusting an edge.
 - Whether Copilot auto-calls `semantic_search` is the model's choice; `#semantic_search` forces it and `.github/copilot-instructions.md` nudges it.
 

@@ -43,6 +43,69 @@ export async function getSymbolsForFile(filePath: string): Promise<BridgeSymbol[
     }));
 }
 
+// Declaration kinds worth indexing for NAME lookup (search_symbol), beyond the
+// callable set used for chunking — interfaces, enums, type aliases, constants,
+// etc. Deliberately separate from RELEVANT_KINDS so this can't change chunk
+// boundaries (which would force a re-index). Locals aren't returned by document
+// symbol providers, so descending stays declaration-level.
+const INDEXABLE_KINDS = new Set<vscode.SymbolKind>([
+  vscode.SymbolKind.Function,
+  vscode.SymbolKind.Method,
+  vscode.SymbolKind.Class,
+  vscode.SymbolKind.Constructor,
+  vscode.SymbolKind.Interface,
+  vscode.SymbolKind.Enum,
+  vscode.SymbolKind.EnumMember,
+  vscode.SymbolKind.Struct,
+  vscode.SymbolKind.Namespace,
+  vscode.SymbolKind.Module,
+  vscode.SymbolKind.Constant,
+  vscode.SymbolKind.Variable,
+  vscode.SymbolKind.Field,
+  vscode.SymbolKind.Property,
+  vscode.SymbolKind.TypeParameter,
+]);
+
+// All indexable declarations in a file, ALL kinds, descending into containers
+// (so enum members, class methods, interface properties are captured). Feeds
+// the standalone `symbols` table via a dedicated bridge message — never
+// chunking, so it can't affect embeddings.
+export async function getAllSymbolsForFile(filePath: string): Promise<BridgeSymbol[]> {
+  const uri = vscode.Uri.file(filePath);
+  await vscode.workspace.openTextDocument(uri);
+  const result = await vscode.commands.executeCommand<
+    vscode.DocumentSymbol[] | vscode.SymbolInformation[] | undefined
+  >('vscode.executeDocumentSymbolProvider', uri);
+  if (!result || result.length === 0) return [];
+
+  if (isDocumentSymbolArray(result)) {
+    const out: BridgeSymbol[] = [];
+    const walk = (syms: vscode.DocumentSymbol[]): void => {
+      for (const sym of syms) {
+        if (INDEXABLE_KINDS.has(sym.kind)) {
+          out.push({
+            name: sym.name,
+            kind: vscode.SymbolKind[sym.kind],
+            startLine: sym.range.start.line + 1,
+            endLine: sym.range.end.line + 1,
+          });
+        }
+        if (sym.children?.length) walk(sym.children);
+      }
+    };
+    walk(result);
+    return out;
+  }
+  return result
+    .filter((s) => INDEXABLE_KINDS.has(s.kind))
+    .map((s) => ({
+      name: s.name,
+      kind: vscode.SymbolKind[s.kind],
+      startLine: s.location.range.start.line + 1,
+      endLine: s.location.range.end.line + 1,
+    }));
+}
+
 function isDocumentSymbolArray(
   arr: vscode.DocumentSymbol[] | vscode.SymbolInformation[],
 ): arr is vscode.DocumentSymbol[] {

@@ -9,6 +9,7 @@ import { VectorStore } from './storage/store.js';
 import { Indexer } from './indexing/indexer.js';
 import { startWatcher } from './indexing/watcher.js';
 import { buildCallGraph, updateFileGraph } from './indexing/graphBuilder.js';
+import { buildSymbols, updateFileSymbols } from './indexing/symbolBuilder.js';
 import { relative, sep } from 'node:path';
 import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
@@ -150,6 +151,10 @@ async function main() {
       void updateFileGraph(workspaceRoot, store, rel).catch((err) =>
         console.error(`[swe-search] call graph: incremental update failed for ${rel}:`, err),
       );
+      // Keep the standalone symbol table current too (no-op until it's built).
+      void updateFileSymbols(workspaceRoot, store, rel).catch((err) =>
+        console.error(`[swe-search] symbols: incremental update failed for ${rel}:`, err),
+      );
     };
     startWatcher(workspaceRoot, indexer, config.exclude, onFileIndexed);
     console.error('[swe-search] incremental watch active');
@@ -195,6 +200,47 @@ async function main() {
         );
       }
     })().catch((err) => console.error('[swe-search] call graph build failed:', err));
+  }
+
+  // Explicit one-time symbol-table build (opt-in via SWE_BUILD_SYMBOLS=1). Same
+  // shape as the call-graph build: DETACHED, embedding-free — it reads the LSP
+  // bridge's document symbols (ALL kinds, incl. non-callable) and writes the
+  // shareable `symbols` table. Never re-chunks or re-embeds. Aborts cleanly if
+  // the bridge isn't running.
+  if (holdsIndexLock && process.env.SWE_BUILD_SYMBOLS === '1') {
+    void (async () => {
+      await ready;
+      console.error(
+        '[swe-search] symbols: starting one-time build (needs the VS Code LSP bridge running)...',
+      );
+      const startAt = Date.now();
+      let lastLog = 0;
+      const stats = await buildSymbols(workspaceRoot, store, {
+        delayMs: 5,
+        onProgress: (p) => {
+          const now = Date.now();
+          if (now - lastLog < 1000 && p.doneFiles !== p.totalFiles) return;
+          lastLog = now;
+          const elapsed = Math.round((now - startAt) / 1000);
+          console.error(
+            `[swe-search] symbols: ${p.doneFiles}/${p.totalFiles} files, ${p.symbols} symbols — ${elapsed}s`,
+          );
+        },
+      });
+      if (stats.bridgeDown) {
+        console.error(
+          '[swe-search] symbols: LSP bridge not reachable — build aborted. Open the ' +
+            'workspace in VS Code with the extension active, then restart with SWE_BUILD_SYMBOLS=1. ' +
+            '(It resumes where it left off.)',
+        );
+      } else {
+        console.error(
+          `[swe-search] symbols: done — ${stats.symbols} symbols across ${stats.filesProcessed} ` +
+            `files (${stats.filesSkipped} already built). This index.db can be shared; teammates ` +
+            'get symbol lookup offline (no bridge needed).',
+        );
+      }
+    })().catch((err) => console.error('[swe-search] symbol build failed:', err));
   }
 
   registerSemanticSearchTool(server, store, config, workspaceRoot, ready);

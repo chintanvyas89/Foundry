@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as net from 'net';
 import * as fs from 'fs';
 import { getPipePath } from './pipeName';
-import { getSymbolsForFile } from './symbolProvider';
+import { getSymbolsForFile, getAllSymbolsForFile } from './symbolProvider';
 import { getCallHierarchy } from './callHierarchy';
 import { getReferences, getImplementations } from './references';
 import { SearchClient } from './searchClient';
@@ -102,6 +102,12 @@ async function handleRequest(socket: net.Socket, line: string) {
     } else if (msg.type === 'implementations') {
       const refs = await getImplementations(msg.file, msg.line ?? 1, msg.symbol);
       socket.write(JSON.stringify({ id: msg.id, refs }) + '\n');
+    } else if (msg.type === 'allSymbols') {
+      // All indexable declaration kinds for the standalone symbols table —
+      // separate from the chunking symbol stream below, so it can't change
+      // chunk boundaries / embeddings.
+      const symbols = await getAllSymbolsForFile(msg.file);
+      socket.write(JSON.stringify({ id: msg.id, symbols }) + '\n');
     } else {
       const symbols = await getSymbolsForFile(msg.file);
       socket.write(JSON.stringify({ id: msg.id, symbols }) + '\n');
