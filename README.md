@@ -294,6 +294,32 @@ Use whichever you prefer — `exclude` keeps everything in one config file;
 `.sweignore` is handy if you'd rather keep the ignore list separate. Excludes
 apply to both the initial build and the live watcher.
 
+## Setting up on a teammate's machine
+
+Everything except the index file itself comes from the clone. Each dev does this
+once:
+
+1. **Build the MCP server:** `cd local-semantic-search-mcp && npm install && npm run build`.
+   `npm install` downloads the embedding model (~1 GB) **once** over the network,
+   then caches it under `node_modules`; everything is offline afterward. (`dist/`
+   and `node_modules/` are gitignored, so this step is always local.)
+2. **Install the extension** (needed to *build/refresh* indexes or use the search
+   panel; not needed to just query a shared index): `code --install-extension
+   lsp-bridge-extension/swe-search-lsp-bridge-0.8.0.vsix`. The `.vsix` **is**
+   committed, so it's already in the clone.
+3. **Config is committed.** `.vscode/mcp.json` uses `${workspaceFolder}`, so it
+   works as-is — no per-machine edits.
+
+Then pick one:
+
+- **Build your own index** (self-contained): open the repo in VS Code, add
+  `SWE_BUILD_ALL=1` to `.vscode/mcp.json`'s `env`, restart the MCP server, wait for
+  the four `done` logs, then remove the flag. The first launch also embeds the
+  workspace (the one heavy step).
+- **Reuse a shared index** (skip building): get `index.db` from a teammate (see
+  below) and drop it at `<workspace>/.swe-search/index.db`. Note `.swe-search/` is
+  **gitignored**, so the DB is *not* in the clone — it must be shared out-of-band.
+
 ## Sharing the index between developers
 
 The index (`.swe-search/index.db`) is **portable** — paths are stored relative to
@@ -315,12 +341,17 @@ few — everything shared is reused instantly. Requirements: same `model`/`dtype
 (a mismatch triggers a clean rebuild automatically) and, for maximum reuse, a
 similar code state.
 
-The **call graph travels with the index too.** If the shared `index.db` was built
-with `SWE_BUILD_GRAPH=1` (see [Persisted call graph](#persisted-call-graph-optional-shareable)),
-its `call_edges` are relative-path and portable, so recipients get whole-repo
-`trace_calls` **offline — without a language server or the extension**. Locally
-changed files show stale edges until the watcher refetches them (only if the
-bridge is running); everything else is exact.
+**All the persisted indexes travel with `index.db` too.** Whichever were built —
+call graph (`SWE_BUILD_GRAPH`), symbols (`SWE_BUILD_SYMBOLS`), usages
+(`SWE_BUILD_USAGES`), implementations (`SWE_BUILD_IMPLS`), or all via
+`SWE_BUILD_ALL` — store **relative-path, portable** rows, so recipients get
+whole-repo `trace_calls` / `show_execution_flow` / `search_symbol` (non-callables
+included) / `find_usages` / `find_implementations`, plus the deterministic
+`architecture_overview` module map, **offline — without a language server or the
+extension**. Locally changed files show stale rows until the watcher refetches
+them (only if the bridge is running); everything else is exact. Tip: build with
+`SWE_BUILD_ALL=1` before sharing so teammates get every code-intelligence feature
+with zero setup beyond dropping in the file.
 
 To share the one-time **model download** as well (useful for offline machines),
 copy `local-semantic-search-mcp/node_modules/@huggingface/transformers/.cache` too —
