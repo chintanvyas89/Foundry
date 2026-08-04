@@ -11,6 +11,7 @@ import { startWatcher } from './indexing/watcher.js';
 import { buildCallGraph, updateFileGraph } from './indexing/graphBuilder.js';
 import { buildSymbols, updateFileSymbols } from './indexing/symbolBuilder.js';
 import { buildUsages, updateFileUsages } from './indexing/usageBuilder.js';
+import { buildImpls, updateFileImpls } from './indexing/implsBuilder.js';
 import { relative, sep } from 'node:path';
 import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
@@ -18,6 +19,7 @@ import { registerSearchSymbolTool } from './tools/searchSymbol.js';
 import { registerTraceCallsTool } from './tools/traceCalls.js';
 import { registerExecutionFlowTool } from './tools/showExecutionFlow.js';
 import { registerSymbolRefTools } from './tools/symbolRefs.js';
+import { registerRepoOverviewTool } from './tools/repoOverview.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -164,6 +166,11 @@ async function main() {
           updateFileUsages(workspaceRoot, store, rel).catch((err) =>
             console.error(`[swe-search] usages: incremental update failed for ${rel}:`, err),
           ),
+        )
+        .then(() =>
+          updateFileImpls(workspaceRoot, store, rel).catch((err) =>
+            console.error(`[swe-search] impls: incremental update failed for ${rel}:`, err),
+          ),
         );
     };
     startWatcher(workspaceRoot, indexer, config.exclude, onFileIndexed);
@@ -171,132 +178,94 @@ async function main() {
   })();
   ready.catch((err) => console.error('[swe-search] background init failed:', err));
 
-  // Explicit one-time call-graph build (opt-in via SWE_BUILD_GRAPH=1). Runs
-  // DETACHED — never inside `ready`, which gates search — so a long LSP pass
-  // doesn't block queries. Embedding-free: reads indexed symbols + the LSP
-  // bridge, writes the shareable call_edges graph. Needs VS Code + the bridge
-  // running; aborts cleanly if it isn't.
-  if (holdsIndexLock && process.env.SWE_BUILD_GRAPH === '1') {
-    void (async () => {
-      await ready;
-      console.error(
-        '[swe-search] call graph: starting one-time build (needs the VS Code LSP bridge running)...',
-      );
-      const startAt = Date.now();
-      let lastLog = 0;
-      const stats = await buildCallGraph(workspaceRoot, store, {
-        delayMs: 5,
-        onProgress: (p) => {
-          const now = Date.now();
-          if (now - lastLog < 1000 && p.doneFiles !== p.totalFiles) return;
-          lastLog = now;
-          const elapsed = Math.round((now - startAt) / 1000);
-          console.error(
-            `[swe-search] call graph: ${p.doneFiles}/${p.totalFiles} files, ${p.edges} edges — ${elapsed}s`,
-          );
-        },
-      });
-      if (stats.bridgeDown) {
-        console.error(
-          '[swe-search] call graph: LSP bridge not reachable — build aborted. Open the ' +
-            'workspace in VS Code with the extension active, then restart with SWE_BUILD_GRAPH=1. ' +
-            '(It resumes where it left off.)',
-        );
-      } else {
-        console.error(
-          `[swe-search] call graph: done — ${stats.edges} edges across ${stats.filesProcessed} ` +
-            `files (${stats.filesSkipped} already built). This index.db can be shared; teammates ` +
-            'get the call graph offline (no bridge needed).',
-        );
-      }
-    })().catch((err) => console.error('[swe-search] call graph build failed:', err));
-  }
+  // Explicit one-time index builds — all opt-in, DETACHED (never inside `ready`,
+  // which gates search, so a long LSP pass doesn't block queries), and
+  // EMBEDDING-FREE (they read the LSP bridge + already-indexed data and never
+  // re-chunk or re-embed). Each writes a shareable table into index.db. Set an
+  // individual flag to build one, or SWE_BUILD_ALL=1 to build them in dependency
+  // order (symbols first — usages/impls key off it). All are resumable: a build
+  // that aborts (bridge down) continues where it left off on restart.
+  type BuildResult = {
+    bridgeDown: boolean;
+    noSymbols?: boolean;
+    filesProcessed: number;
+    filesSkipped: number;
+  };
+  const builds: Array<{
+    flag: string;
+    label: string;
+    unit: string;
+    run: (onProgress: (p: { doneFiles: number; totalFiles: number }) => void) => Promise<BuildResult>;
+    total: () => number;
+  }> = [
+    {
+      flag: 'SWE_BUILD_SYMBOLS', label: 'symbols', unit: 'symbols',
+      run: (onProgress) => buildSymbols(workspaceRoot, store, { delayMs: 5, onProgress }),
+      total: () => store.symbolStats().symbols,
+    },
+    {
+      flag: 'SWE_BUILD_GRAPH', label: 'call graph', unit: 'edges',
+      run: (onProgress) => buildCallGraph(workspaceRoot, store, { delayMs: 5, onProgress }),
+      total: () => store.graphStats().edges,
+    },
+    {
+      flag: 'SWE_BUILD_USAGES', label: 'usages', unit: 'references',
+      run: (onProgress) => buildUsages(workspaceRoot, store, { delayMs: 5, onProgress }),
+      total: () => store.usageStats().refs,
+    },
+    {
+      flag: 'SWE_BUILD_IMPLS', label: 'implementations', unit: 'implementations',
+      run: (onProgress) => buildImpls(workspaceRoot, store, { delayMs: 5, onProgress }),
+      total: () => store.implStats().impls,
+    },
+  ];
 
-  // Explicit one-time symbol-table build (opt-in via SWE_BUILD_SYMBOLS=1). Same
-  // shape as the call-graph build: DETACHED, embedding-free — it reads the LSP
-  // bridge's document symbols (ALL kinds, incl. non-callable) and writes the
-  // shareable `symbols` table. Never re-chunks or re-embeds. Aborts cleanly if
-  // the bridge isn't running.
-  if (holdsIndexLock && process.env.SWE_BUILD_SYMBOLS === '1') {
+  const buildAll = process.env.SWE_BUILD_ALL === '1';
+  const selected = builds.filter((b) => buildAll || process.env[b.flag] === '1');
+  if (holdsIndexLock && selected.length > 0) {
     void (async () => {
       await ready;
-      console.error(
-        '[swe-search] symbols: starting one-time build (needs the VS Code LSP bridge running)...',
-      );
-      const startAt = Date.now();
-      let lastLog = 0;
-      const stats = await buildSymbols(workspaceRoot, store, {
-        delayMs: 5,
-        onProgress: (p) => {
+      if (buildAll) {
+        console.error(
+          '[swe-search] build-all: symbols → call graph → usages → implementations ' +
+            '(one-time, needs the VS Code LSP bridge running)...',
+        );
+      }
+      for (const b of selected) {
+        console.error(`[swe-search] ${b.label}: starting one-time build...`);
+        const startAt = Date.now();
+        let lastLog = 0;
+        const stats = await b.run((p) => {
           const now = Date.now();
           if (now - lastLog < 1000 && p.doneFiles !== p.totalFiles) return;
           lastLog = now;
-          const elapsed = Math.round((now - startAt) / 1000);
           console.error(
-            `[swe-search] symbols: ${p.doneFiles}/${p.totalFiles} files, ${p.symbols} symbols — ${elapsed}s`,
+            `[swe-search] ${b.label}: ${p.doneFiles}/${p.totalFiles} files — ` +
+              `${Math.round((now - startAt) / 1000)}s`,
           );
-        },
-      });
-      if (stats.bridgeDown) {
-        console.error(
-          '[swe-search] symbols: LSP bridge not reachable — build aborted. Open the ' +
-            'workspace in VS Code with the extension active, then restart with SWE_BUILD_SYMBOLS=1. ' +
-            '(It resumes where it left off.)',
-        );
-      } else {
-        console.error(
-          `[swe-search] symbols: done — ${stats.symbols} symbols across ${stats.filesProcessed} ` +
-            `files (${stats.filesSkipped} already built). This index.db can be shared; teammates ` +
-            'get symbol lookup offline (no bridge needed).',
-        );
-      }
-    })().catch((err) => console.error('[swe-search] symbol build failed:', err));
-  }
-
-  // Explicit one-time usages build (opt-in via SWE_BUILD_USAGES=1). Same shape
-  // as the graph/symbol builds: DETACHED, embedding-free — it reads the LSP
-  // bridge's reference provider for every declaration in the symbols table and
-  // writes the shareable `symbol_refs` index, so find_usages works offline.
-  // Requires the symbol table (SWE_BUILD_SYMBOLS) first.
-  if (holdsIndexLock && process.env.SWE_BUILD_USAGES === '1') {
-    void (async () => {
-      await ready;
-      console.error(
-        '[swe-search] usages: starting one-time build (needs the VS Code LSP bridge running)...',
-      );
-      const startAt = Date.now();
-      let lastLog = 0;
-      const stats = await buildUsages(workspaceRoot, store, {
-        delayMs: 5,
-        onProgress: (p) => {
-          const now = Date.now();
-          if (now - lastLog < 1000 && p.doneFiles !== p.totalFiles) return;
-          lastLog = now;
-          const elapsed = Math.round((now - startAt) / 1000);
+        });
+        if (stats.noSymbols) {
           console.error(
-            `[swe-search] usages: ${p.doneFiles}/${p.totalFiles} files, ${p.refs} refs — ${elapsed}s`,
+            `[swe-search] ${b.label}: the symbol table is empty — build it first with ` +
+              'SWE_BUILD_SYMBOLS=1 (or SWE_BUILD_ALL=1).',
           );
-        },
-      });
-      if (stats.noSymbols) {
-        console.error(
-          '[swe-search] usages: the symbol table is empty — build it first with ' +
-            'SWE_BUILD_SYMBOLS=1, then re-run with SWE_BUILD_USAGES=1.',
-        );
-      } else if (stats.bridgeDown) {
-        console.error(
-          '[swe-search] usages: LSP bridge not reachable — build aborted. Open the ' +
-            'workspace in VS Code with the extension active, then restart with SWE_BUILD_USAGES=1. ' +
-            '(It resumes where it left off.)',
-        );
-      } else {
-        console.error(
-          `[swe-search] usages: done — ${stats.refs} references across ${stats.filesProcessed} ` +
-            `files (${stats.filesSkipped} already built). This index.db can be shared; teammates ` +
-            'get find_usages offline (no bridge needed).',
-        );
+          if (buildAll) break;
+        } else if (stats.bridgeDown) {
+          console.error(
+            `[swe-search] ${b.label}: LSP bridge not reachable — build aborted. Open VS Code ` +
+              'with the extension active and restart. (It resumes where it left off.)',
+          );
+          if (buildAll) break;
+        } else {
+          console.error(
+            `[swe-search] ${b.label}: done — ${b.total()} ${b.unit} (${stats.filesProcessed} files ` +
+              `this run, ${stats.filesSkipped} already built). Shareable in index.db; teammates get ` +
+              'it offline (no bridge needed).',
+          );
+        }
       }
-    })().catch((err) => console.error('[swe-search] usage build failed:', err));
+      if (buildAll) console.error('[swe-search] build-all: complete.');
+    })().catch((err) => console.error('[swe-search] index build failed:', err));
   }
 
   registerSemanticSearchTool(server, store, config, workspaceRoot, ready);
@@ -311,6 +280,8 @@ async function main() {
   registerExecutionFlowTool(server, store, workspaceRoot);
   // find_usages / find_implementations — also bridge-backed, no gate needed.
   registerSymbolRefTools(server, store, workspaceRoot);
+  // Workspace orientation summary — reads stored counts only, no gate.
+  registerRepoOverviewTool(server, store);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

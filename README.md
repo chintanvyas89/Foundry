@@ -108,18 +108,19 @@ absolute node path if VS Code can't find `node`). Then:
   step, click to open, cycle-guarded) — and **Uses** (references across the
   workspace), both powered by the language server.
 
-For Copilot, the server exposes six MCP tools: **`semantic_search`** (by
+For Copilot, the server exposes seven MCP tools: **`semantic_search`** (by
 meaning), **`search_symbol`** (exact/partial name — callables *and* non-callable
 declarations like interfaces/enums/types once the symbol table is built),
 **`trace_calls`** (call graph, one level), **`show_execution_flow`** (multi-level
-call-graph walk), **`find_usages`** (references), and **`find_implementations`**
-(of an interface).
+call-graph walk), **`find_usages`** (references), **`find_implementations`** (of an
+interface), and **`repo_overview`** (a quick orientation summary — file/chunk
+counts, language breakdown, and which indexes are built).
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
 dispatch, cross-language calls, or data flow — **except `trace_calls`,
-`show_execution_flow`, and `find_usages`**, which also answer from their
-**persisted indexes** (see below) when the bridge is down.
+`show_execution_flow`, `find_usages`, and `find_implementations`**, which also
+answer from their **persisted indexes** (see below) when the bridge is down.
 
 `semantic_search` uses **hybrid retrieval**: semantic (vector) ranking with a
 bounded full-text (FTS5) bonus, so exact identifiers/tokens the embedding misses
@@ -209,6 +210,34 @@ source line) inside `index.db`. Like the other builds it **runs detached**, is
 teammates), and is **not a re-embed**. `find_usages` automatically uses the
 persisted index whenever the live bridge isn't running (pass the symbol name so
 it can look the entry up).
+
+### Persisted implementations index (optional, shareable)
+
+`find_implementations` works the same way: build it once (it also builds on the
+symbol table) and it answers offline.
+
+```bash
+SWE_BUILD_IMPLS=1 node local-semantic-search-mcp/dist/index.js
+```
+
+It stores each concrete implementation (`symbol_impls`) inside `index.db` —
+detached, resumable/incremental, shareable, not a re-embed — and
+`find_implementations` falls back to it when the bridge is down.
+
+### Build everything at once
+
+Instead of setting each flag, use **`SWE_BUILD_ALL=1`** to build all four indexes
+in dependency order (symbols → call graph → usages → implementations) in one run:
+
+```bash
+SWE_BUILD_ALL=1 node local-semantic-search-mcp/dist/index.js
+```
+
+Each stage is detached, resumable, and shareable; the pass stops early and
+resumes on restart if the bridge drops. (All builds must run in the server that
+holds the index lock — i.e. the one VS Code's `.vscode/mcp.json` starts — so set
+the flag there and restart that server; a separate manual `node` invocation can't
+acquire the lock while VS Code's server is running.)
 
 **LSP bridge (better chunks).** With the extension running, the status bar shows
 **`LSP Bridge: listening`** — the server then chunks on real editor symbols

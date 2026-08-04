@@ -101,21 +101,47 @@ export function registerSymbolRefTools(
     'find_implementations',
     'Find concrete implementations of an interface, abstract method, or type at a ' +
       'location (file + line). Use for "what implements this interface?", "which ' +
-      'classes implement X?". Requires the VS Code LSP bridge to be running.',
+      'classes implement X?". Uses the live language server when the VS Code LSP ' +
+      'bridge is running, otherwise the persisted implementations index (if built — ' +
+      'pass the symbol name so the offline lookup can find it).',
     params,
     async ({ file, line, symbol }) => {
-      const refs = await getImplementationsViaBridge(workspaceRoot, file, line, symbol);
-      if (!refs) return { content: [{ type: 'text', text: `Implementations ${UNAVAILABLE}` }] };
-      if (refs.length === 0) {
+      const impls = await getImplementationsViaBridge(workspaceRoot, file, line, symbol);
+
+      // Live path: the language server answered.
+      if (impls) {
+        if (impls.length === 0) {
+          return {
+            content: [{ type: 'text', text: `No implementations found for ${file}:${line}.` }],
+            structuredContent: { results: [], source: 'live' },
+          };
+        }
         return {
-          content: [{ type: 'text', text: `No implementations found for ${file}:${line}.` }],
-          structuredContent: { results: [] },
+          content: [{ type: 'text', text: `Implementations (${impls.length}):\n${fmt(impls)}` }],
+          structuredContent: { results: impls, source: 'live' },
         };
       }
-      return {
-        content: [{ type: 'text', text: `Implementations (${refs.length}):\n${fmt(refs)}` }],
-        structuredContent: { results: refs },
-      };
+
+      // Fallback: the persisted implementations index (keyed by name).
+      if (symbol) {
+        const stored = store.getImplementations(toRel(file), symbol);
+        if (stored.length > 0) {
+          const nodes: BridgeRef[] = stored.map((s) => ({ file: toAbs(s.file), line: s.line, text: s.text }));
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  `Implementations of ${symbol} (${stored.length}) — from the saved index ` +
+                  `(LSP bridge not running):\n${fmt(nodes)}`,
+              },
+            ],
+            structuredContent: { results: nodes, source: 'persisted' },
+          };
+        }
+      }
+
+      return { content: [{ type: 'text', text: `Implementations ${UNAVAILABLE}` }] };
     },
   );
 }

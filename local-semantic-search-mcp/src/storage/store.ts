@@ -125,6 +125,29 @@ CREATE TABLE IF NOT EXISTS usage_files (
 );
 `;
 
+// Persisted implementations. Populated from the LSP bridge's implementation
+// provider by an explicit one-time build (SWE_BUILD_IMPLS) — embedding-free —
+// so find_implementations works offline once built. Each row is one concrete
+// implementation of the interface/abstract symbol (defFile, defName) at
+// (implFile, implLine). Mirrors symbol_refs (see USAGE_SCHEMA) exactly.
+const IMPL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS symbol_impls (
+  defFile TEXT NOT NULL,
+  defName TEXT NOT NULL,
+  implFile TEXT NOT NULL,
+  implLine INTEGER NOT NULL,
+  implText TEXT NOT NULL,
+  viaFile TEXT NOT NULL,
+  PRIMARY KEY (defFile, defName, implFile, implLine, viaFile)
+);
+CREATE INDEX IF NOT EXISTS idx_impls_def ON symbol_impls(defFile, defName);
+CREATE INDEX IF NOT EXISTS idx_impls_via ON symbol_impls(viaFile);
+CREATE TABLE IF NOT EXISTS impl_files (
+  path TEXT PRIMARY KEY,
+  fileHash TEXT NOT NULL
+);
+`;
+
 // Paths in `chunks.file` / `chunks.id` / `files.path` are stored RELATIVE to
 // the workspace root (forward-slash separated). That keeps the index portable
 // between machines/checkouts, so it can be shared without every dev re-indexing.
@@ -155,6 +178,7 @@ export class VectorStore {
     this.db.exec(EDGE_SCHEMA);
     this.db.exec(SYMBOL_SCHEMA);
     this.db.exec(USAGE_SCHEMA);
+    this.db.exec(IMPL_SCHEMA);
     try {
       this.db.exec(FTS_SCHEMA);
       this.ftsEnabled = true;
@@ -311,6 +335,8 @@ export class VectorStore {
         this.deleteSymbolFile(path);
         this.deleteRefsByViaFile(path);
         this.deleteUsageFile(path);
+        this.deleteImplsByViaFile(path);
+        this.deleteImplFile(path);
         pruned++;
       }
     }
@@ -816,6 +842,81 @@ export class VectorStore {
     return { refs, filesBuilt };
   }
 
+  // ---- Persisted implementations (embedding-free) ----------------------------
+
+  upsertImpls(impls: SymbolImpl[]): void {
+    if (impls.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO symbol_impls (defFile, defName, implFile, implLine, implText, viaFile)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    this.db.exec('BEGIN');
+    try {
+      for (const i of impls) {
+        stmt.run(i.defFile, i.defName, i.implFile, i.implLine, i.implText, i.viaFile);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  deleteImplsByViaFile(file: string): void {
+    this.db.prepare('DELETE FROM symbol_impls WHERE viaFile = ?').run(file);
+  }
+
+  getImplementations(file: string, name: string): Array<{ file: string; line: number; text: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT implFile AS file, implLine AS line, implText AS text
+           FROM symbol_impls WHERE defFile = ? AND defName = ?
+           ORDER BY implFile, implLine`,
+      )
+      .all(file, name) as Array<{ file: string; line: number; text: string }>;
+    return rows;
+  }
+
+  getImplFileHash(file: string): string | null {
+    const row = this.db.prepare('SELECT fileHash FROM impl_files WHERE path = ?').get(file) as
+      | { fileHash: string }
+      | undefined;
+    return row?.fileHash ?? null;
+  }
+
+  setImplFileHash(file: string, hash: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO impl_files (path, fileHash) VALUES (?, ?)').run(file, hash);
+  }
+
+  deleteImplFile(file: string): void {
+    this.db.prepare('DELETE FROM impl_files WHERE path = ?').run(file);
+  }
+
+  implStats(): { impls: number; filesBuilt: number } {
+    const impls = (this.db.prepare('SELECT COUNT(*) AS c FROM symbol_impls').get() as { c: number }).c;
+    const filesBuilt = (this.db.prepare('SELECT COUNT(*) AS c FROM impl_files').get() as { c: number }).c;
+    return { impls, filesBuilt };
+  }
+
+  // Workspace overview: file/chunk counts and a language breakdown by file
+  // extension. Computed from what's already indexed — no schema change, no
+  // re-index. Powers the repo_overview tool (LLM orientation).
+  repoStats(): { files: number; chunks: number; languages: Array<{ ext: string; files: number }> } {
+    const files = (this.db.prepare('SELECT COUNT(*) AS c FROM files').get() as { c: number }).c;
+    const chunks = (this.db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c;
+    const rows = this.db.prepare('SELECT path FROM files').all() as Array<{ path: string }>;
+    const byExt = new Map<string, number>();
+    for (const { path } of rows) {
+      const m = path.match(/\.([A-Za-z0-9]+)$/);
+      const ext = m ? m[1].toLowerCase() : '(none)';
+      byExt.set(ext, (byExt.get(ext) ?? 0) + 1);
+    }
+    const languages = [...byExt.entries()]
+      .map(([ext, n]) => ({ ext, files: n }))
+      .sort((a, b) => b.files - a.files);
+    return { files, chunks, languages };
+  }
+
   close(): void {
     this.db.close();
   }
@@ -846,6 +947,17 @@ export interface SymbolRef {
   refFile: string;
   refLine: number;
   refText: string;
+  viaFile: string;
+}
+
+// One persisted concrete implementation of a symbol (see IMPL_SCHEMA). Paths are
+// workspace-relative; `viaFile` (= defFile) tags the symbol's file for wipes.
+export interface SymbolImpl {
+  defFile: string;
+  defName: string;
+  implFile: string;
+  implLine: number;
+  implText: string;
   viaFile: string;
 }
 

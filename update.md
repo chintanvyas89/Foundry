@@ -36,11 +36,11 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - LLM drill-down guidance — `.github/copilot-instructions.md`
 
 ## Partial 🟡
-- **Repo metadata (Ph1):** `files(path, fileHash)` only — no `repositories` table, language/size/mtime columns, or language detection.
+- **Repo metadata (Ph1):** `files(path, fileHash)` only — no `repositories` table or size/mtime columns; a `repo_overview` tool now reports file/chunk counts, language breakdown (by extension), and which indexes are built (`store.repoStats`, `src/tools/repoOverview.ts`).
 - **LSP symbols (Ph2):** callable symbols are queryable via `search_symbol` (over `chunks.symbol`) and the persisted call graph; a standalone `symbols` table now also covers **non-callable kinds** (interfaces/enums/consts/types) via an opt-in `SWE_BUILD_SYMBOLS` pass — `src/indexing/symbolBuilder.ts`, `store.symbols`. Still partial: no `chunk_symbol_mapping` join table.
 - **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
 - **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback + compact/expand token control; call-graph context is now folded into retrieval opt-in (`context=true` annotates each hit with callers/callees); still open: enclosing-parent/test context and intent detection.
-- **MCP tools (Ph13):** 6 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `show_execution_flow`, `find_usages`, `find_implementations`).
+- **MCP tools (Ph13):** 7 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `show_execution_flow`, `find_usages`, `find_implementations`, `repo_overview`).
 - **Tree-sitter (Ph14):** chunking only; no import/symbol/relationship extraction.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
 
@@ -80,8 +80,11 @@ non-callable kinds (interfaces/enums/consts/types) — embedding-free, shareable
 `index.db`, incremental via the watcher. **Persisted `find_usages`** (`symbol_refs`,
 `SWE_BUILD_USAGES`, `src/indexing/usageBuilder.ts`) now stores references for every
 declaration in the symbol table, so `find_usages` answers offline (bridge-down
-fallback, like `trace_calls`) — embedding-free and shareable. **Still open:**
-persisted `find_implementations`.
+fallback, like `trace_calls`) — embedding-free and shareable. **Persisted
+`find_implementations`** (`symbol_impls`, `SWE_BUILD_IMPLS`,
+`src/indexing/implsBuilder.ts`) does the same for implementations. All four
+persisted indexes can be built in one pass with **`SWE_BUILD_ALL=1`** (symbols →
+graph → usages → impls, in dependency order).
 
 ### ✅ 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10) — shipped
 `semantic_search` now fuses semantic (cosine) ranking with a **bounded FTS5
@@ -120,7 +123,7 @@ Embedding-free.
 Lazy indexing (Ph11), architecture summaries (Ph9), API/DB graphs (Ph6/7), visualizations (Ph15).
 
 ## Known limitations
-- Call graph, symbol table, and usages are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS` / `SWE_BUILD_USAGES`); until built, `trace_calls`/`show_execution_flow`/`find_usages` need the live bridge and `search_symbol` covers callables only.
+- The persisted indexes (call graph, symbols, usages, implementations) are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS` / `SWE_BUILD_USAGES` / `SWE_BUILD_IMPLS`, or `SWE_BUILD_ALL`); until built, `trace_calls`/`show_execution_flow`/`find_usages`/`find_implementations` need the live bridge and `search_symbol` covers callables only.
 - Semantic search **can't do data flow**, and only *suggests candidates* for dynamic dispatch / cross-language boundaries — verify before trusting an edge.
 - Whether Copilot auto-calls `semantic_search` is the model's choice; `#semantic_search` forces it and `.github/copilot-instructions.md` nudges it.
 

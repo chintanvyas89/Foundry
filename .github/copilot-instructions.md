@@ -111,4 +111,10 @@ reference to a symbol across the workspace (use for "where is X used?" and impac
 analysis before a change) — it uses the live language server when the bridge is
 running, otherwise the persisted usages index if it has been built (pass the
 symbol name so the offline lookup can find it). **find_implementations** finds the
-concrete implementations of an interface/abstract member (bridge only).
+concrete implementations of an interface/abstract member — same live-then-persisted
+fallback (pass the symbol name for the offline lookup).
+
+For a quick read on an unfamiliar workspace — its size, main languages, and which
+code-intelligence indexes are available — call **repo_overview** (no inputs). It's
+a cheap orientation summary; use it before deciding whether to lean on
+trace_calls/find_usages offline.
