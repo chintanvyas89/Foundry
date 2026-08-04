@@ -118,3 +118,14 @@ For a quick read on an unfamiliar workspace — its size, main languages, and wh
 code-intelligence indexes are available — call **repo_overview** (no inputs). It's
 a cheap orientation summary; use it before deciding whether to lean on
 trace_calls/find_usages offline.
+
+To understand how the codebase is *organized* — its modules, how they depend on
+each other, where the entry points are, and which symbols are hotspots — call
+**architecture_overview**. With no argument it returns a whole-repo module map
+(modules = directories, ranked by size, each with its dependencies/dependents,
+call-graph entry points, and reference hotspots); pass `module="<path or name>"`
+(e.g. `"src/storage"` or `"storage"`) to drill into one module. It's a
+deterministic, offline aggregation of the persisted symbols/usages/call-graph
+indexes — no LLM and no re-index — so narrate its output rather than expecting
+prose from it, and build those three indexes first for full detail. Use it for
+"how is this organized / what are the main pieces / what depends on what".

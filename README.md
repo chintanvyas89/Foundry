@@ -108,13 +108,16 @@ absolute node path if VS Code can't find `node`). Then:
   step, click to open, cycle-guarded) — and **Uses** (references across the
   workspace), both powered by the language server.
 
-For Copilot, the server exposes seven MCP tools: **`semantic_search`** (by
+For Copilot, the server exposes eight MCP tools: **`semantic_search`** (by
 meaning), **`search_symbol`** (exact/partial name — callables *and* non-callable
 declarations like interfaces/enums/types once the symbol table is built),
 **`trace_calls`** (call graph, one level), **`show_execution_flow`** (multi-level
 call-graph walk), **`find_usages`** (references), **`find_implementations`** (of an
-interface), and **`repo_overview`** (a quick orientation summary — file/chunk
-counts, language breakdown, and which indexes are built).
+interface), **`repo_overview`** (a quick orientation summary — file/chunk
+counts, language breakdown, and which indexes are built), and
+**`architecture_overview`** (a deterministic module-level map — modules =
+directories with their dependencies/dependents, call-graph entry points, and
+reference hotspots; drill into one with `module="<path or name>"`).
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic

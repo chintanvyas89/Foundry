@@ -24,6 +24,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Usages / implementations (on-demand)**: `find_usages` + `find_implementations` MCP tools and a panel **Uses** button — references/implementations via the language server — `lsp-bridge-extension/src/references.ts`, `local-semantic-search-mcp/src/tools/symbolRefs.ts`
 - **Hybrid retrieval (FTS5 + embeddings)**: `semantic_search` fuses vector ranking with a bounded FTS5 lexical bonus, so exact identifiers/tokens the embedding misses still surface — without regressing natural-language queries. Identifiers are **split at index + query time** (`cosineSimilarity` ↔ "cosine similarity", `get_user_by_id` ↔ "user id") so word-level queries match compound names. Transparent to callers; no new tool, no re-embed (a one-time FTS text backfill/upgrade reuses stored chunk text, version-gated) — `src/storage/store.ts` (`searchHybrid`/`searchText`/`backfillFts`/`ftsAugment`), `src/tools/semanticSearch.ts`
 - **Token-lean output**: `semantic_search` returns compact signatures (symbol + file:line + score + one-line signature) by default; `expand=[n,…]` pulls full bodies of chosen prior hits without re-querying, and `detail="full"` returns all bodies. Full text still goes to UI clients via `structuredContent` — `src/tools/semanticSearch.ts`, `store.getChunksByIds`
+- **Architecture map (Ph9, deterministic)**: `architecture_overview` MCP tool aggregates the persisted symbols/usages/call-graph indexes into a module-level map (modules = directories) — each module's dependencies/dependents (from the usages index), call-graph entry points (roots), and reference hotspots; `module="<path or name>"` drills into one module (files, key symbols, deps). No embedder, no bridge, no schema change, no re-index; the LLM narrates prose from the structured map — `src/tools/architectureOverview.ts`, `src/storage/store.ts` (`refEdges`/`symbolHotspots`/`allSymbolRows`/`callEdges`)
 - **Persisted, shareable call graph**: an explicit one-time build (`SWE_BUILD_GRAPH=1`) walks the LSP bridge and stores directed caller→callee edges in `call_edges` (workspace-relative, so the graph rides inside `index.db` and is shareable — teammates get it offline, no bridge/LSP). Resumable + incremental (`graph_files` markers, watcher refetch on change). `trace_calls` falls back to this graph when the bridge is down. Embedding-free — reuses indexed symbols, no re-embed — `src/indexing/graphBuilder.ts`, `src/storage/store.ts` (`call_edges`/`getCallees`/`getCallers`/`upsertEdges`), `src/tools/traceCalls.ts`
 
 **Beyond the original vision** (built, though not in the 16 phases)
@@ -40,12 +41,12 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **LSP symbols (Ph2):** callable symbols are queryable via `search_symbol` (over `chunks.symbol`) and the persisted call graph; a standalone `symbols` table now also covers **non-callable kinds** (interfaces/enums/consts/types) via an opt-in `SWE_BUILD_SYMBOLS` pass — `src/indexing/symbolBuilder.ts`, `store.symbols`. Still partial: no `chunk_symbol_mapping` join table.
 - **Chunk mapping (Ph5):** chunks carry a `symbol` name; no `chunk_symbol_mapping` table.
 - **Retrieval / context expansion (Ph10/12):** embedding search + bounded-FTS hybrid + vector-blend relevance feedback + compact/expand token control; call-graph context is now folded into retrieval opt-in (`context=true` annotates each hit with callers/callees); still open: enclosing-parent/test context and intent detection.
-- **MCP tools (Ph13):** 7 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `show_execution_flow`, `find_usages`, `find_implementations`, `repo_overview`).
+- **MCP tools (Ph13):** 8 of 12 (`semantic_search` — now hybrid vector+FTS, `search_symbol`, `trace_calls`, `show_execution_flow`, `find_usages`, `find_implementations`, `repo_overview`, `architecture_overview`).
 - **Tree-sitter (Ph14):** chunking only; no import/symbol/relationship extraction.
 - **Incremental (Ph16):** chunks + watcher done; no graph invalidation or summaries.
 
 ## Not started ⬜
-API graph (Ph6), DB graph (Ph7), architecture summaries (Ph9), lazy indexing (Ph11), visualizations (Ph15). (Symbol relationships/edges, Ph3, are now persisted as the call graph — see Implemented.)
+API graph (Ph6), DB graph (Ph7), lazy indexing (Ph11), visualizations (Ph15). (Symbol relationships/edges, Ph3, are now persisted as the call graph — see Implemented. Architecture summaries, Ph9, now ship as the deterministic `architecture_overview` map — see Implemented; LLM-authored prose summaries remain a later option.)
 
 ## Next up (prioritized)
 
@@ -120,7 +121,10 @@ Embedding-free.
 - **Still open:** intent detection (route query → semantic vs symbol vs usages).
 
 ### 5. Later bets — recommended next
-Lazy indexing (Ph11), architecture summaries (Ph9), API/DB graphs (Ph6/7), visualizations (Ph15).
+Lazy indexing (Ph11), API/DB graphs (Ph6/7), visualizations (Ph15), and
+LLM-authored prose architecture summaries (Ph9 — the deterministic
+`architecture_overview` map already ships; prose narration is the optional next
+step, likely driven by the consuming LLM rather than the offline server).
 
 ## Known limitations
 - The persisted indexes (call graph, symbols, usages, implementations) are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS` / `SWE_BUILD_USAGES` / `SWE_BUILD_IMPLS`, or `SWE_BUILD_ALL`); until built, `trace_calls`/`show_execution_flow`/`find_usages`/`find_implementations` need the live bridge and `search_symbol` covers callables only.

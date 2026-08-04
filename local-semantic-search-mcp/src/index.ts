@@ -20,6 +20,7 @@ import { registerTraceCallsTool } from './tools/traceCalls.js';
 import { registerExecutionFlowTool } from './tools/showExecutionFlow.js';
 import { registerSymbolRefTools } from './tools/symbolRefs.js';
 import { registerRepoOverviewTool } from './tools/repoOverview.js';
+import { registerArchitectureOverviewTool } from './tools/architectureOverview.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -282,6 +283,9 @@ async function main() {
   registerSymbolRefTools(server, store, workspaceRoot);
   // Workspace orientation summary — reads stored counts only, no gate.
   registerRepoOverviewTool(server, store);
+  // Deterministic module-level architecture map — aggregates the persisted
+  // symbols/usages/graph indexes; no gate, no re-index.
+  registerArchitectureOverviewTool(server, store);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

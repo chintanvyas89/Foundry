@@ -917,6 +917,55 @@ export class VectorStore {
     return { files, chunks, languages };
   }
 
+  // ---- Architecture aggregation (embedding-free) -----------------------------
+  // The next four methods aggregate the already-built indexes into module-level
+  // views for architecture_overview. They read only persisted tables — no
+  // embedder, no bridge, no schema change, no re-index.
+
+  // Cross-file dependency edges from the usages index: for each (defFile,
+  // refFile) pair, how many references in refFile point at a symbol defined in
+  // defFile. The tool rolls these up to module→module edges (dirname grouping).
+  refEdges(): Array<{ defFile: string; refFile: string; count: number }> {
+    return this.db
+      .prepare(
+        `SELECT defFile, refFile, COUNT(*) AS count
+           FROM symbol_refs
+          WHERE defFile <> refFile
+          GROUP BY defFile, refFile`,
+      )
+      .all() as Array<{ defFile: string; refFile: string; count: number }>;
+  }
+
+  // Most-referenced symbols (definition → total inbound references), for
+  // "hotspots". Ordered most-referenced first; `limit` caps the result.
+  symbolHotspots(limit = 200): Array<{ file: string; name: string; refs: number }> {
+    return this.db
+      .prepare(
+        `SELECT defFile AS file, defName AS name, COUNT(*) AS refs
+           FROM symbol_refs
+          GROUP BY defFile, defName
+          ORDER BY refs DESC
+          LIMIT ?`,
+      )
+      .all(limit) as Array<{ file: string; name: string; refs: number }>;
+  }
+
+  // Every row in the standalone symbol table (file, name, kind) — the tool ranks
+  // and groups these into "key symbols" per module.
+  allSymbolRows(): Array<{ file: string; name: string; kind: string }> {
+    return this.db
+      .prepare('SELECT file, name, kind FROM symbols')
+      .all() as Array<{ file: string; name: string; kind: string }>;
+  }
+
+  // Every call-graph edge as (fromFile, fromName) → (toFile, toName). The tool
+  // uses these to find entry points (callers that are never callees).
+  callEdges(): Array<{ fromFile: string; fromName: string; toFile: string; toName: string }> {
+    return this.db
+      .prepare('SELECT fromFile, fromName, toFile, toName FROM call_edges')
+      .all() as Array<{ fromFile: string; fromName: string; toFile: string; toName: string }>;
+  }
+
   close(): void {
     this.db.close();
   }
