@@ -1,13 +1,18 @@
+import { join, relative, sep } from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { VectorStore } from '../storage/store.js';
 import {
   getReferencesViaBridge,
   getImplementationsViaBridge,
   type BridgeRef,
 } from '../chunking/lspBridgeClient.js';
 
-// find_usages / find_implementations — like trace_calls, these need the live
-// language server via the LSP bridge, so they return "unavailable" without it.
+// find_usages / find_implementations. find_usages prefers the live language
+// server (via the LSP bridge) but falls back to the persisted usages index
+// (`symbol_refs`) when the bridge is down — so once usages have been built (and
+// they're shareable with the index), it works fully offline. find_implementations
+// stays bridge-only (implementations aren't persisted).
 const params = {
   file: z
     .string()
@@ -30,28 +35,65 @@ function fmt(nodes: BridgeRef[]): string {
     : '  (none)';
 }
 
-export function registerSymbolRefTools(server: McpServer, workspaceRoot: string): void {
+export function registerSymbolRefTools(
+  server: McpServer,
+  store: VectorStore,
+  workspaceRoot: string,
+): void {
+  const toRel = (abs: string) => relative(workspaceRoot, abs).split(sep).join('/');
+  const toAbs = (rel: string) => join(workspaceRoot, rel);
+
   server.tool(
     'find_usages',
     'Find all usages/references of a symbol across the workspace — everywhere a ' +
       'function/class/variable is called, imported, or referenced. Give its location ' +
       '(file + line, e.g. from a semantic_search or search_symbol result). Use for ' +
       '"where is X used?", "what would break if I change X?", impact analysis. ' +
-      "Requires the VS Code LSP bridge; can't resolve dynamic dispatch or cross-language.",
+      'Uses the live language server when the VS Code LSP bridge is running, otherwise ' +
+      'the persisted usages index (if built — pass the symbol name so the offline ' +
+      "lookup can find it). Can't resolve dynamic dispatch or cross-language.",
     params,
     async ({ file, line, symbol }) => {
       const refs = await getReferencesViaBridge(workspaceRoot, file, line, symbol);
-      if (!refs) return { content: [{ type: 'text', text: `Usages ${UNAVAILABLE}` }] };
-      if (refs.length === 0) {
+
+      // Live path: the language server answered.
+      if (refs) {
+        if (refs.length === 0) {
+          return {
+            content: [{ type: 'text', text: `No usages found for ${file}:${line}.` }],
+            structuredContent: { results: [], source: 'live' },
+          };
+        }
         return {
-          content: [{ type: 'text', text: `No usages found for ${file}:${line}.` }],
-          structuredContent: { results: [] },
+          content: [{ type: 'text', text: `Usages (${refs.length}):\n${fmt(refs)}` }],
+          structuredContent: { results: refs, source: 'live' },
         };
       }
-      return {
-        content: [{ type: 'text', text: `Usages (${refs.length}):\n${fmt(refs)}` }],
-        structuredContent: { results: refs },
-      };
+
+      // Fallback: the persisted usages index. Keyed by name, like the call graph.
+      if (symbol) {
+        const usages = store.getUsages(toRel(file), symbol);
+        if (usages.length > 0) {
+          const nodes: BridgeRef[] = usages.map((u) => ({
+            file: toAbs(u.file),
+            line: u.line,
+            text: u.text,
+          }));
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  `Usages of ${symbol} (${usages.length}) — from the saved usages index ` +
+                  `(LSP bridge not running):\n${fmt(nodes)}`,
+              },
+            ],
+            structuredContent: { results: nodes, source: 'persisted' },
+          };
+        }
+      }
+
+      return { content: [{ type: 'text', text: `Usages ${UNAVAILABLE}` }] };
     },
   );
 

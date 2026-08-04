@@ -116,9 +116,9 @@ call-graph walk), **`find_usages`** (references), and **`find_implementations`**
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
-dispatch, cross-language calls, or data flow — **except `trace_calls` and
-`show_execution_flow`**, which also answer from the **persisted call graph** (see
-below) when the bridge is down.
+dispatch, cross-language calls, or data flow — **except `trace_calls`,
+`show_execution_flow`, and `find_usages`**, which also answer from their
+**persisted indexes** (see below) when the bridge is down.
 
 `semantic_search` uses **hybrid retrieval**: semantic (vector) ranking with a
 bounded full-text (FTS5) bonus, so exact identifiers/tokens the embedding misses
@@ -186,6 +186,25 @@ it **runs detached**, is **resumable + incremental**, rides in the shared
 `index.db` (works offline for teammates), and is **not a re-embed** — vectors are
 untouched. Once built, `search_symbol` unions these with the callable symbols and
 labels each hit with its kind.
+
+### Persisted usages index (optional, shareable)
+
+`find_usages` normally asks the live language server for a symbol's references,
+but they can also be **built once and persisted** so it works offline. It builds
+on the symbol table (references are collected for every declaration in it), so
+build that first, then:
+
+```bash
+SWE_BUILD_SYMBOLS=1 node local-semantic-search-mcp/dist/index.js   # if not already built
+SWE_BUILD_USAGES=1  node local-semantic-search-mcp/dist/index.js
+```
+
+It stores each reference (`symbol_refs`: where the symbol is used, plus the
+source line) inside `index.db`. Like the other builds it **runs detached**, is
+**resumable + incremental**, rides in the shared `index.db` (works offline for
+teammates), and is **not a re-embed**. `find_usages` automatically uses the
+persisted index whenever the live bridge isn't running (pass the symbol name so
+it can look the entry up).
 
 **LSP bridge (better chunks).** With the extension running, the status bar shows
 **`LSP Bridge: listening`** — the server then chunks on real editor symbols

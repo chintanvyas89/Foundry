@@ -100,6 +100,31 @@ CREATE TABLE IF NOT EXISTS symbol_files (
 );
 `;
 
+// Persisted references ("usages"). Populated from the LSP bridge's reference
+// provider by an explicit one-time build (SWE_BUILD_USAGES) — embedding-free —
+// so find_usages works offline once built. Each row is one reference to the
+// symbol (defFile, defName) at (refFile, refLine), with the referencing source
+// line for display. `viaFile` (= defFile) records which symbol's file produced
+// the row, so incremental re-indexing can wipe and refetch a file's references.
+// `usage_files` tracks which files have been scanned (resumable/incremental).
+const USAGE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS symbol_refs (
+  defFile TEXT NOT NULL,
+  defName TEXT NOT NULL,
+  refFile TEXT NOT NULL,
+  refLine INTEGER NOT NULL,
+  refText TEXT NOT NULL,
+  viaFile TEXT NOT NULL,
+  PRIMARY KEY (defFile, defName, refFile, refLine, viaFile)
+);
+CREATE INDEX IF NOT EXISTS idx_refs_def ON symbol_refs(defFile, defName);
+CREATE INDEX IF NOT EXISTS idx_refs_via ON symbol_refs(viaFile);
+CREATE TABLE IF NOT EXISTS usage_files (
+  path TEXT PRIMARY KEY,
+  fileHash TEXT NOT NULL
+);
+`;
+
 // Paths in `chunks.file` / `chunks.id` / `files.path` are stored RELATIVE to
 // the workspace root (forward-slash separated). That keeps the index portable
 // between machines/checkouts, so it can be shared without every dev re-indexing.
@@ -129,6 +154,7 @@ export class VectorStore {
     this.db.exec(SCHEMA);
     this.db.exec(EDGE_SCHEMA);
     this.db.exec(SYMBOL_SCHEMA);
+    this.db.exec(USAGE_SCHEMA);
     try {
       this.db.exec(FTS_SCHEMA);
       this.ftsEnabled = true;
@@ -283,6 +309,8 @@ export class VectorStore {
         this.deleteGraphFile(path);
         this.deleteSymbolsByFile(path);
         this.deleteSymbolFile(path);
+        this.deleteRefsByViaFile(path);
+        this.deleteUsageFile(path);
         pruned++;
       }
     }
@@ -687,6 +715,86 @@ export class VectorStore {
     return { symbols, filesBuilt };
   }
 
+  // Distinct declarations from the symbols table, for the usages build to ask
+  // the language server about each. Pass `file` to limit to one file (used by
+  // incremental usage updates). Falls back to nothing if the symbol table hasn't
+  // been built — the usages build depends on it.
+  listSymbols(file?: string): Array<{ file: string; name: string; startLine: number }> {
+    const sql =
+      'SELECT DISTINCT file, name, startLine FROM symbols' +
+      (file ? ' WHERE file = ?' : '') +
+      ' ORDER BY file, startLine';
+    const rows = (file ? this.db.prepare(sql).all(file) : this.db.prepare(sql).all()) as Array<{
+      file: string;
+      name: string;
+      startLine: number;
+    }>;
+    return rows;
+  }
+
+  // ---- Persisted usages / references (embedding-free) ------------------------
+
+  // Insert reference rows, ignoring exact duplicates. `viaFile` records the file
+  // whose symbol produced them, so deleteRefsByViaFile can wipe a file's rows.
+  upsertRefs(refs: SymbolRef[]): void {
+    if (refs.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO symbol_refs (defFile, defName, refFile, refLine, refText, viaFile)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    this.db.exec('BEGIN');
+    try {
+      for (const r of refs) {
+        stmt.run(r.defFile, r.defName, r.refFile, r.refLine, r.refText, r.viaFile);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  deleteRefsByViaFile(file: string): void {
+    this.db.prepare('DELETE FROM symbol_refs WHERE viaFile = ?').run(file);
+  }
+
+  // All stored references to the symbol (file, name), ordered for stable output.
+  getUsages(file: string, name: string): Array<{ file: string; line: number; text: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT refFile AS file, refLine AS line, refText AS text
+           FROM symbol_refs WHERE defFile = ? AND defName = ?
+           ORDER BY refFile, refLine`,
+      )
+      .all(file, name) as Array<{ file: string; line: number; text: string }>;
+    return rows;
+  }
+
+  getUsageFileHash(file: string): string | null {
+    const row = this.db.prepare('SELECT fileHash FROM usage_files WHERE path = ?').get(file) as
+      | { fileHash: string }
+      | undefined;
+    return row?.fileHash ?? null;
+  }
+
+  setUsageFileHash(file: string, hash: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO usage_files (path, fileHash) VALUES (?, ?)')
+      .run(file, hash);
+  }
+
+  deleteUsageFile(file: string): void {
+    this.db.prepare('DELETE FROM usage_files WHERE path = ?').run(file);
+  }
+
+  // Reference count + how many files have been scanned — for build progress and
+  // to tell whether usages have been populated at all.
+  usageStats(): { refs: number; filesBuilt: number } {
+    const refs = (this.db.prepare('SELECT COUNT(*) AS c FROM symbol_refs').get() as { c: number }).c;
+    const filesBuilt = (this.db.prepare('SELECT COUNT(*) AS c FROM usage_files').get() as { c: number }).c;
+    return { refs, filesBuilt };
+  }
+
   close(): void {
     this.db.close();
   }
@@ -707,6 +815,17 @@ export interface SymbolRow {
   kind: string;
   startLine: number;
   endLine: number;
+}
+
+// One persisted reference to a symbol (see USAGE_SCHEMA). Paths are workspace-
+// relative; `viaFile` (= defFile) tags the symbol's file for incremental wipes.
+export interface SymbolRef {
+  defFile: string;
+  defName: string;
+  refFile: string;
+  refLine: number;
+  refText: string;
+  viaFile: string;
 }
 
 // A directed caller -> callee edge, tagged with the file whose symbol produced

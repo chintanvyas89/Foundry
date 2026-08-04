@@ -10,6 +10,7 @@ import { Indexer } from './indexing/indexer.js';
 import { startWatcher } from './indexing/watcher.js';
 import { buildCallGraph, updateFileGraph } from './indexing/graphBuilder.js';
 import { buildSymbols, updateFileSymbols } from './indexing/symbolBuilder.js';
+import { buildUsages, updateFileUsages } from './indexing/usageBuilder.js';
 import { relative, sep } from 'node:path';
 import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
@@ -152,9 +153,18 @@ async function main() {
         console.error(`[swe-search] call graph: incremental update failed for ${rel}:`, err),
       );
       // Keep the standalone symbol table current too (no-op until it's built).
-      void updateFileSymbols(workspaceRoot, store, rel).catch((err) =>
-        console.error(`[swe-search] symbols: incremental update failed for ${rel}:`, err),
-      );
+      void updateFileSymbols(workspaceRoot, store, rel)
+        .catch((err) =>
+          console.error(`[swe-search] symbols: incremental update failed for ${rel}:`, err),
+        )
+        // Refresh this file's usages after its symbols are current (also a no-op
+        // until the usages index has been built). Chained so it reads fresh
+        // symbol rows.
+        .then(() =>
+          updateFileUsages(workspaceRoot, store, rel).catch((err) =>
+            console.error(`[swe-search] usages: incremental update failed for ${rel}:`, err),
+          ),
+        );
     };
     startWatcher(workspaceRoot, indexer, config.exclude, onFileIndexed);
     console.error('[swe-search] incremental watch active');
@@ -243,6 +253,52 @@ async function main() {
     })().catch((err) => console.error('[swe-search] symbol build failed:', err));
   }
 
+  // Explicit one-time usages build (opt-in via SWE_BUILD_USAGES=1). Same shape
+  // as the graph/symbol builds: DETACHED, embedding-free — it reads the LSP
+  // bridge's reference provider for every declaration in the symbols table and
+  // writes the shareable `symbol_refs` index, so find_usages works offline.
+  // Requires the symbol table (SWE_BUILD_SYMBOLS) first.
+  if (holdsIndexLock && process.env.SWE_BUILD_USAGES === '1') {
+    void (async () => {
+      await ready;
+      console.error(
+        '[swe-search] usages: starting one-time build (needs the VS Code LSP bridge running)...',
+      );
+      const startAt = Date.now();
+      let lastLog = 0;
+      const stats = await buildUsages(workspaceRoot, store, {
+        delayMs: 5,
+        onProgress: (p) => {
+          const now = Date.now();
+          if (now - lastLog < 1000 && p.doneFiles !== p.totalFiles) return;
+          lastLog = now;
+          const elapsed = Math.round((now - startAt) / 1000);
+          console.error(
+            `[swe-search] usages: ${p.doneFiles}/${p.totalFiles} files, ${p.refs} refs — ${elapsed}s`,
+          );
+        },
+      });
+      if (stats.noSymbols) {
+        console.error(
+          '[swe-search] usages: the symbol table is empty — build it first with ' +
+            'SWE_BUILD_SYMBOLS=1, then re-run with SWE_BUILD_USAGES=1.',
+        );
+      } else if (stats.bridgeDown) {
+        console.error(
+          '[swe-search] usages: LSP bridge not reachable — build aborted. Open the ' +
+            'workspace in VS Code with the extension active, then restart with SWE_BUILD_USAGES=1. ' +
+            '(It resumes where it left off.)',
+        );
+      } else {
+        console.error(
+          `[swe-search] usages: done — ${stats.refs} references across ${stats.filesProcessed} ` +
+            `files (${stats.filesSkipped} already built). This index.db can be shared; teammates ` +
+            'get find_usages offline (no bridge needed).',
+        );
+      }
+    })().catch((err) => console.error('[swe-search] usage build failed:', err));
+  }
+
   registerSemanticSearchTool(server, store, config, workspaceRoot, ready);
   // Symbol-name lookup over the stored index — no embedder needed, so no `ready`
   // gate; returns whatever is already indexed.
@@ -254,7 +310,7 @@ async function main() {
   // embedder/bridge needed at query time (needs the graph to have been built).
   registerExecutionFlowTool(server, store, workspaceRoot);
   // find_usages / find_implementations — also bridge-backed, no gate needed.
-  registerSymbolRefTools(server, workspaceRoot);
+  registerSymbolRefTools(server, store, workspaceRoot);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

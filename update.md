@@ -74,8 +74,11 @@ implementations via the bridge). The persisted `call_edges` table (see #1) cover
 whole-repo caller/callee relationships offline, and the standalone **`symbols`
 table** (`SWE_BUILD_SYMBOLS`, `src/indexing/symbolBuilder.ts`) now adds
 non-callable kinds (interfaces/enums/consts/types) — embedding-free, shareable in
-`index.db`, incremental via the watcher. **Still open:** persisted `find_usages`
-results (offline references).
+`index.db`, incremental via the watcher. **Persisted `find_usages`** (`symbol_refs`,
+`SWE_BUILD_USAGES`, `src/indexing/usageBuilder.ts`) now stores references for every
+declaration in the symbol table, so `find_usages` answers offline (bridge-down
+fallback, like `trace_calls`) — embedding-free and shareable. **Still open:**
+persisted `find_implementations`.
 
 ### ✅ 3. Hybrid retrieval: FTS5 + embeddings (Ph8/10) — shipped
 `semantic_search` now fuses semantic (cosine) ranking with a **bounded FTS5
@@ -112,7 +115,7 @@ Opt-in to stay token-lean; a no-op when the graph isn't built. Embedding-free.
 Lazy indexing (Ph11), architecture summaries (Ph9), API/DB graphs (Ph6/7), visualizations (Ph15).
 
 ## Known limitations
-- Call graph and symbol table are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS`); until built, `trace_calls`/`show_execution_flow` need the live bridge and `search_symbol` covers callables only.
+- Call graph, symbol table, and usages are built on demand (`SWE_BUILD_GRAPH` / `SWE_BUILD_SYMBOLS` / `SWE_BUILD_USAGES`); until built, `trace_calls`/`show_execution_flow`/`find_usages` need the live bridge and `search_symbol` covers callables only.
 - Semantic search **can't do data flow**, and only *suggests candidates* for dynamic dispatch / cross-language boundaries — verify before trusting an edge.
 - Whether Copilot auto-calls `semantic_search` is the model's choice; `#semantic_search` forces it and `.github/copilot-instructions.md` nudges it.
 

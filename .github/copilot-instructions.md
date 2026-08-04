@@ -107,5 +107,7 @@ tree.
 
 Related bridge-backed tools (same file/line inputs): **find_usages** lists every
 reference to a symbol across the workspace (use for "where is X used?" and impact
-analysis before a change), and **find_implementations** finds the concrete
-implementations of an interface/abstract member.
+analysis before a change) — it uses the live language server when the bridge is
+running, otherwise the persisted usages index if it has been built (pass the
+symbol name so the offline lookup can find it). **find_implementations** finds the
+concrete implementations of an interface/abstract member (bridge only).
