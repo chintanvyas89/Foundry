@@ -100,6 +100,22 @@ async function main() {
       );
     }
 
+    // SWE_REINDEX_EXT=.php,.module — targeted re-index. Drops the stored chunks +
+    // file-hash for files with these extensions so the build below re-chunks and
+    // re-embeds just them (e.g. to pick up newly-added PHP tree-sitter chunking)
+    // without a full re-embed of the whole repo. Applied only by the lock-holding
+    // build server; a no-op for query-only servers.
+    const reindexExt = (process.env.SWE_REINDEX_EXT ?? '')
+      .split(',')
+      .map((e) => e.trim())
+      .filter(Boolean);
+    if (reindexExt.length > 0 && !rebuilt) {
+      const invalidated = store.invalidateByExtensions(reindexExt);
+      console.error(
+        `[swe-search] SWE_REINDEX_EXT: invalidated ${invalidated} file(s) matching ${reindexExt.join(', ')} — they will re-chunk & re-embed this run`,
+      );
+    }
+
     const indexer = new Indexer(workspaceRoot, store, config.exclude);
     console.error('[swe-search] building initial index...');
     const startAt = Date.now();

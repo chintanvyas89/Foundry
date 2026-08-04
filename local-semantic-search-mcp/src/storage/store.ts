@@ -289,6 +289,28 @@ export class VectorStore {
     this.db.prepare('DELETE FROM files WHERE path = ?').run(file);
   }
 
+  // Drop the stored chunks + file-hash for every indexed file whose path ends
+  // with one of the given extensions (e.g. ['.php', '.module']). Used by the
+  // SWE_REINDEX_EXT flag so a chunker change (like adding PHP tree-sitter
+  // support) can re-chunk + re-embed just those files on the next build, without
+  // forcing a full re-embed of the whole repo. Returns the number of files
+  // invalidated. Extensions are matched case-insensitively.
+  invalidateByExtensions(extensions: string[]): number {
+    const exts = extensions.map((e) => (e.startsWith('.') ? e : `.${e}`).toLowerCase());
+    if (exts.length === 0) return 0;
+    const rows = this.db.prepare('SELECT path FROM files').all() as Array<{ path: string }>;
+    let count = 0;
+    for (const { path } of rows) {
+      const lower = path.toLowerCase();
+      if (exts.some((e) => lower.endsWith(e))) {
+        this.deleteByFile(path);
+        this.deleteFileHash(path);
+        count++;
+      }
+    }
+    return count;
+  }
+
   private getMeta(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
       | { value: string }

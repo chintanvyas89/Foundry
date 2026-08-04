@@ -57,7 +57,34 @@ const LANGUAGES: Record<string, { wasm: string; symbolNodeTypes: string[] }> = {
     wasm: 'tree-sitter-cpp.wasm',
     symbolNodeTypes: ['function_definition'],
   },
+  ...phpExtensions(),
 };
+
+// PHP — including Drupal's non-`.php` source extensions (`.module`, `.inc`,
+// `.install`, `.theme`, `.profile`, `.engine`), which are all plain PHP. The full
+// PHP grammar handles the leading `<?php` tag and mixed-HTML templates; a file
+// that uses one of these extensions but isn't PHP simply yields no symbol nodes
+// and falls through to fixed-window chunking, so the mapping is safe.
+//
+// Top-level `function_definition` captures Drupal hooks (e.g. `mymodule_form_alter`)
+// as their own named chunks; `class_declaration` captures classes like Drupal
+// route providers as one named chunk, which makes them findable by `search_symbol`
+// offline — the gap that left PHP files effectively unsearchable before.
+function phpExtensions(): Record<string, { wasm: string; symbolNodeTypes: string[] }> {
+  const php = {
+    wasm: 'tree-sitter-php.wasm',
+    symbolNodeTypes: [
+      'function_definition',
+      'method_declaration',
+      'class_declaration',
+      'interface_declaration',
+      'trait_declaration',
+      'enum_declaration',
+    ],
+  };
+  const exts = ['.php', '.module', '.inc', '.install', '.theme', '.profile', '.engine'];
+  return Object.fromEntries(exts.map((e) => [e, php]));
+}
 
 let initialized: Promise<void> | null = null;
 const loadedLanguages = new Map<string, Language>();

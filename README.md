@@ -141,10 +141,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.10.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.10.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.10.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -356,6 +356,35 @@ npx @vscode/vsce package
 
 ---
 
+## Languages & targeted re-index
+
+Symbol-boundary chunking (tree-sitter) covers TypeScript/JS(X), Python, Go, Rust,
+Java, C/C++, and **PHP — including Drupal's PHP extensions** (`.module`, `.inc`,
+`.install`, `.theme`, `.profile`, `.engine`). PHP classes, interfaces, traits, and
+top-level functions (e.g. Drupal hooks like `mymodule_form_alter`) each become
+their own **named** chunk, so `search_symbol` finds them offline and semantic
+search ranks them precisely. Anything else falls back to fixed-window chunking,
+which still indexes the file but without symbol names.
+
+**Applying a chunker change to an existing index.** The indexer skips files whose
+content is unchanged, so simply upgrading (e.g. gaining PHP support) does **not**
+re-chunk already-indexed files. To re-chunk + re-embed **just** the affected
+extensions — without a full re-embed of the whole repo — set **`SWE_REINDEX_EXT`**
+(comma-separated) on the lock-holding server for one run:
+
+```bash
+SWE_REINDEX_EXT=.php,.module,.inc,.install,.theme,.profile,.engine \
+  node local-semantic-search-mcp/dist/index.js
+```
+
+It drops the stored chunks + file-hash for matching files so the build re-embeds
+only those (all other files keep their vectors). In VS Code, add it to
+`.vscode/mcp.json`'s `env`, restart the MCP server, wait for `index ready`, then
+remove it. (For richer PHP call graphs / usages, also install a PHP language
+server extension in VS Code — see below.)
+
+---
+
 ## Verifying it works
 
 - **Quickest (no VS Code):** from `local-semantic-search-mcp/`, run
@@ -402,7 +431,7 @@ once:
    and `node_modules/` are gitignored, so this step is always local.)
 2. **Install the extension** (needed to *build/refresh* indexes or use the search
    panel; not needed to just query a shared index): `code --install-extension
-   lsp-bridge-extension/swe-search-lsp-bridge-0.9.9.vsix`. The `.vsix` **is**
+   lsp-bridge-extension/swe-search-lsp-bridge-0.9.10.vsix`. The `.vsix` **is**
    committed, so it's already in the clone.
 3. **Config is committed.** `.vscode/mcp.json` uses `${workspaceFolder}`, so it
    works as-is — no per-machine edits.
