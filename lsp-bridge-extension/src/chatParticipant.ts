@@ -26,13 +26,15 @@ const BASE_PREAMBLE = [
 const PLAN_PREAMBLE = [
   'You are @codebase, planning an implementation change for the user’s CURRENT VS',
   'Code workspace. Workspace context is provided below: an index overview, the',
-  'module architecture, the MOST RELEVANT CODE WITH FULL BODIES, and the real',
-  'build/test conventions. Base every claim on that context and the actual code —',
-  'do not guess from memory. If a detail (a function’s determinants, a runtime',
-  'mode) is not shown in the context, say so rather than inventing it. Verify',
-  'build/test commands against the provided package.json scripts and test files —',
-  'NEVER invent a command like "npm test". Reason about the runtime/process model,',
-  'config, and concurrency, not just the code.',
+  'module architecture, the project’s own docs, the MOST RELEVANT CODE WITH FULL',
+  'BODIES, and the project’s build/test manifests. Base every claim on that context',
+  'and the actual code — do not guess from memory. If a detail (a function’s',
+  'determinants, a runtime mode) is not shown in the context, say so rather than',
+  'inventing it. Use ONLY the build/test commands evidenced by the provided',
+  'manifests, scripts, and test files (whatever the ecosystem — npm, pytest, go',
+  'test, cargo, make, gradle, …); NEVER invent a build or test command that is not',
+  'shown. Reason about the runtime/process model, config, and concurrency from the',
+  'code and docs, not just individual functions.',
   '\n\nRespond with ONLY the following markdown, filling every section:',
   '\n## Plan',
   '\n**Context:** current state in 1–2 lines.',
@@ -359,9 +361,11 @@ async function runPlan(
   return {};
 }
 
-// Assemble a rich, deterministic context pack for /plan: index overview, the
-// module architecture, the most relevant code with FULL bodies (not lean
-// signatures), and the workspace's real build/test conventions. All read-only.
+// Assemble a rich, deterministic context pack for /plan. Everything here is
+// language-agnostic: index overview, module architecture, the most relevant code
+// with FULL bodies, the project's OWN docs (README/ARCHITECTURE — where any repo
+// describes how it builds/runs), and its build/test manifests. All read-only, no
+// project-specific assumptions — the model adapts to whatever ecosystem it finds.
 async function gatherPlanContext(
   client: SearchClient,
   prompt: string,
@@ -380,6 +384,10 @@ async function gatherPlanContext(
 
   await add('Index overview', 'repo_overview', {});
   await add('Architecture (modules)', 'architecture_overview', {});
+
+  const docs = await gatherProjectDocs(output);
+  if (docs) parts.push(docs);
+
   // FULL bodies of the most relevant code — the key upgrade over lean signatures.
   await add('Most relevant code (full bodies)', 'semantic_search', {
     query: prompt,
@@ -398,48 +406,145 @@ async function gatherPlanContext(
   );
 }
 
-// Read the workspace's real build/test conventions so the plan uses actual
-// commands instead of inventing "npm test": every package.json's scripts, plus
-// a sample of test-file paths to reveal the naming/runner convention.
-async function gatherConventions(output: vscode.OutputChannel): Promise<string> {
-  const lines: string[] = [];
+// Directories that never hold source worth reading — excluded from every scan.
+const SCAN_EXCLUDE = '**/{node_modules,dist,build,out,target,.venv,venv,vendor,.git,bin,obj}/**';
+
+// Pull the top of the project's own docs — README / ARCHITECTURE / CONTRIBUTING.
+// Every repo, in any language, documents how it builds, runs, and is structured
+// here; this is where process/runtime facts live, so the model learns them from
+// the project itself rather than any hardcoded, repo-specific knowledge.
+async function gatherProjectDocs(output: vscode.OutputChannel): Promise<string> {
   try {
-    const pkgs = await vscode.workspace.findFiles('**/package.json', '**/node_modules/**', 8);
-    for (const uri of pkgs) {
+    const uris = await vscode.workspace.findFiles(
+      '**/{README.md,README.rst,README.txt,README,ARCHITECTURE.md,CONTRIBUTING.md}',
+      SCAN_EXCLUDE,
+      10,
+    );
+    // Prefer shallow (repo-root) docs, and lead with the README.
+    const sorted = uris
+      .map((u) => ({ uri: u, rel: vscode.workspace.asRelativePath(u) }))
+      .sort((a, b) => {
+        const depth = a.rel.split('/').length - b.rel.split('/').length;
+        if (depth !== 0) return depth;
+        const ar = /readme/i.test(a.rel) ? 0 : 1;
+        const br = /readme/i.test(b.rel) ? 0 : 1;
+        return ar - br;
+      });
+    const chosen = sorted.slice(0, 2);
+    const blocks: string[] = [];
+    for (const { uri, rel } of chosen) {
       try {
-        const buf = await vscode.workspace.fs.readFile(uri);
-        const json = JSON.parse(Buffer.from(buf).toString('utf8')) as { scripts?: Record<string, string> };
-        const rel = vscode.workspace.asRelativePath(uri);
-        const scripts = json.scripts ? Object.entries(json.scripts) : [];
-        lines.push(
-          scripts.length
-            ? `${rel} scripts:\n  ` + scripts.map(([k, v]) => `${k}: ${v}`).join('\n  ')
-            : `${rel} scripts: (none)`,
-        );
+        const raw = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+        blocks.push(`\`${rel}\` (excerpt):\n${head(raw, 1800)}`);
       } catch {
-        /* skip unreadable/malformed package.json */
+        /* skip unreadable doc */
       }
     }
+    return blocks.length ? '#### Project docs\n' + blocks.join('\n\n') : '';
   } catch (err) {
-    output.appendLine(`[chat/plan] package.json scan failed: ${String(err)}`);
+    output.appendLine(`[chat/plan] docs scan failed: ${String(err)}`);
+    return '';
   }
+}
 
+// Common build/test manifest filenames across ecosystems. Their presence + a
+// short excerpt tells the model the real build/test commands to use, whatever
+// the language — no assumption of npm/Node.
+const MANIFEST_GLOB =
+  '**/{package.json,pyproject.toml,setup.cfg,setup.py,tox.ini,pytest.ini,noxfile.py,' +
+  'go.mod,Cargo.toml,pom.xml,build.gradle,build.gradle.kts,build.sbt,Gemfile,' +
+  'composer.json,mix.exs,Makefile,justfile,Taskfile.yml,Taskfile.yaml,CMakeLists.txt}';
+
+// Read the workspace's real build/test conventions so the plan uses actual
+// commands (npm / pytest / go test / cargo / make / …) instead of inventing one,
+// plus a language-neutral sample of test-file paths to reveal the runner.
+async function gatherConventions(output: vscode.OutputChannel): Promise<string> {
+  const sections: string[] = [];
+  const seen = new Set<string>();
+
+  const collect = async (pattern: string): Promise<void> => {
+    try {
+      const uris = await vscode.workspace.findFiles(pattern, SCAN_EXCLUDE, 12);
+      for (const uri of uris) {
+        const rel = vscode.workspace.asRelativePath(uri);
+        if (seen.has(rel) || sections.length >= 10) continue;
+        seen.add(rel);
+        try {
+          const raw = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+          const excerpt = manifestExcerpt(rel, raw);
+          if (excerpt) sections.push(`\`${rel}\`:\n${excerpt}`);
+        } catch {
+          /* skip unreadable/malformed manifest */
+        }
+      }
+    } catch (err) {
+      output.appendLine(`[chat/plan] manifest scan failed (${pattern}): ${String(err)}`);
+    }
+  };
+
+  await collect(MANIFEST_GLOB);
+  await collect('**/*.csproj');
+
+  // Test files — language-neutral: common test dirs, plus name patterns that
+  // cover pytest (test_*.py), Go (*_test.go), JS/TS (*.test.ts), JUnit (*Test.java), etc.
   try {
     const tests = await vscode.workspace.findFiles(
-      '**/{test,tests,__tests__,spec,scripts}/**/*.{mjs,cjs,js,ts}',
-      '**/node_modules/**',
-      40,
+      '**/{test,tests,__tests__,spec,specs,e2e}/**/*.*',
+      SCAN_EXCLUDE,
+      60,
     );
-    const names = tests
+    const byName = await vscode.workspace.findFiles(
+      '**/{test_*,*_test,*.test,*.spec,*_spec,*Test,*Tests,*Spec}.*',
+      SCAN_EXCLUDE,
+      60,
+    );
+    const names = [...tests, ...byName]
       .map((u) => vscode.workspace.asRelativePath(u))
-      .filter((p) => /(^|\/)(test|spec)|[._-](test|spec)\./i.test(p))
-      .slice(0, 20);
-    if (names.length) lines.push('Test files (naming / runner convention):\n  ' + names.join('\n  '));
+      .filter((p) => /(^|\/)(tests?|specs?|e2e)(\/|$)|[._-](test|spec)s?\.|(^|\/)test_/i.test(p));
+    const unique = [...new Set(names)].sort().slice(0, 20);
+    if (unique.length) sections.push('Test files (naming / runner convention):\n  ' + unique.join('\n  '));
   } catch (err) {
     output.appendLine(`[chat/plan] test scan failed: ${String(err)}`);
   }
 
-  return lines.length ? '#### Build / test conventions\n' + lines.join('\n') : '';
+  return sections.length ? '#### Build / test conventions\n' + sections.join('\n\n') : '';
+}
+
+// Ecosystem-aware excerpt of a manifest: pull the build/test-relevant bit
+// (package.json scripts, Makefile/Taskfile targets) or a truncated head.
+function manifestExcerpt(rel: string, raw: string): string {
+  const base = baseName(rel).toLowerCase();
+  if (base === 'package.json') {
+    try {
+      const json = JSON.parse(raw) as { scripts?: Record<string, string> };
+      const scripts = json.scripts ? Object.entries(json.scripts) : [];
+      return scripts.length ? 'scripts:\n  ' + scripts.map(([k, v]) => `${k}: ${v}`).join('\n  ') : '(no scripts)';
+    } catch {
+      return head(raw, 600);
+    }
+  }
+  if (base === 'makefile' || base === 'justfile' || base.startsWith('taskfile')) {
+    const targets = raw
+      .split('\n')
+      .filter((l) => /^[A-Za-z0-9][\w.\/-]*:\s*(#.*)?$|^[A-Za-z0-9][\w.\/-]*:\s+[^=]/.test(l))
+      .slice(0, 30);
+    return targets.length ? 'targets:\n  ' + targets.map((t) => t.trim()).join('\n  ') : head(raw, 800);
+  }
+  return head(raw, 900);
+}
+
+function baseName(path: string): string {
+  const i = path.replace(/\\/g, '/').lastIndexOf('/');
+  return i < 0 ? path : path.slice(i + 1);
+}
+
+// First ~n characters (whole lines) of text, with a truncation marker.
+function head(text: string, n: number): string {
+  const trimmed = text.trimEnd();
+  if (trimmed.length <= n) return trimmed;
+  const cut = trimmed.slice(0, n);
+  const lastNl = cut.lastIndexOf('\n');
+  return (lastNl > n * 0.5 ? cut.slice(0, lastNl) : cut) + '\n… (truncated)';
 }
 
 function labelFor(call: vscode.LanguageModelToolCallPart): string {
