@@ -160,3 +160,54 @@ function symbolName(node: SyntaxNode): string | undefined {
   const nameNode = node.childForFieldName('name');
   return nameNode?.text;
 }
+
+export interface OutlineSymbol {
+  name: string;
+  kind: string; // cleaned node type, e.g. 'class', 'method', 'function'
+  startLine: number;
+  endLine: number;
+}
+
+// A structural outline of a file: every symbol node (functions, classes, AND the
+// methods inside them — unlike chunking, this descends into classes) with its
+// line range. Powers two-pass read_file: pass 1 returns this cheap outline, pass 2
+// fetches just the symbol the model picks. Offline, no index, supported languages.
+export async function outlineWithTreeSitter(filePath: string, ext: string): Promise<OutlineSymbol[]> {
+  const entry = LANGUAGES[ext];
+  if (!entry) return [];
+
+  await ensureInitialized();
+  const language = await getLanguage(ext);
+  const parser = new Parser();
+  parser.setLanguage(language);
+
+  const source = readFileSync(filePath, 'utf-8');
+  const tree = parser.parse(source);
+  if (!tree) return [];
+
+  const symbolTypes = new Set(entry.symbolNodeTypes);
+  const out: OutlineSymbol[] = [];
+
+  const visit = (node: SyntaxNode) => {
+    if (symbolTypes.has(node.type)) {
+      const name = symbolName(node);
+      if (name) {
+        out.push({
+          name,
+          kind: node.type.replace(/_(declaration|definition|item)$/, ''),
+          startLine: node.startPosition.row + 1,
+          endLine: node.endPosition.row + 1,
+        });
+      }
+      // Keep descending (unlike the chunker) so class methods are captured too.
+    }
+    for (let i = 0; i < node.childCount; i++) {
+      const child = node.child(i);
+      if (child) visit(child);
+    }
+  };
+
+  visit(tree.rootNode);
+  out.sort((a, b) => a.startLine - b.startLine);
+  return out;
+}

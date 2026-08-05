@@ -141,10 +141,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.11.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.11.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.12.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.12.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.11.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.12.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -179,9 +179,12 @@ counts, language breakdown, and which indexes are built),
 **`architecture_overview`** (a deterministic module-level map — modules =
 directories with their dependencies/dependents, call-graph entry points, and
 reference hotspots; drill into one with `module="<path or name>"`), and
-**`read_file`** (read a located file's actual source, with line numbers — the
-drill step after search identifies a named module/file; absolute or relative path,
-optional line range).
+**`read_file`** (read a located file's actual source — the drill step after search
+identifies a named module/file). It's **two-pass to stay token-lean**: call it with
+just the file to get an *outline* (the file's functions/classes/methods with line
+ranges, no bodies), then again with `symbol="name"` to read just that symbol's code
+(or a `startLine`/`endLine` range); small files return whole. Absolute or relative
+path.
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
@@ -434,7 +437,7 @@ once:
    and `node_modules/` are gitignored, so this step is always local.)
 2. **Install the extension** (needed to *build/refresh* indexes or use the search
    panel; not needed to just query a shared index): `code --install-extension
-   lsp-bridge-extension/swe-search-lsp-bridge-0.9.11.vsix`. The `.vsix` **is**
+   lsp-bridge-extension/swe-search-lsp-bridge-0.9.12.vsix`. The `.vsix` **is**
    committed, so it's already in the clone.
 3. **Config is committed.** `.vscode/mcp.json` uses `${workspaceFolder}`, so it
    works as-is — no per-machine edits.

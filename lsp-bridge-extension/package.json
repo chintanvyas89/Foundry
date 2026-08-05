@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -284,7 +284,7 @@
       {
         "name": "foundry_readFile",
         "displayName": "Foundry: read file",
-        "modelDescription": "Read the actual contents of a workspace file (with line numbers). Use this to read the EXACT file/module located via search_symbol, architecture_overview, or a semantic_search hit — e.g. to explain how a named module works from real source, not fuzzy snippets. Accepts an absolute or workspace-relative path; optional startLine/endLine (large files are capped, request a range for more).",
+        "modelDescription": "Read a workspace file, two-pass to stay token-lean. Call with just `file` to get an OUTLINE first (the file's functions/classes/methods with line ranges, no bodies); then call again with `symbol=\"name\"` to read just that symbol's code, or `startLine`/`endLine` for a range. Small files return whole. Use to read the EXACT file/module located via search_symbol, architecture_overview, or a semantic_search hit — real source, not fuzzy snippets. Absolute or workspace-relative path.",
         "icon": "$(file-code)",
         "tags": [
           "foundry",
@@ -297,9 +297,17 @@
               "type": "string",
               "description": "File to read — absolute or workspace-relative (e.g. \"src/storage/store.ts\")."
             },
+            "symbol": {
+              "type": "string",
+              "description": "Pass 2: read just this symbol's body (a name from the pass-1 outline)."
+            },
+            "outline": {
+              "type": "boolean",
+              "description": "Force outline-only (symbols + line ranges, no bodies)."
+            },
             "startLine": {
               "type": "number",
-              "description": "1-based first line to read (default 1)."
+              "description": "1-based first line to read (a specific slice)."
             },
             "endLine": {
               "type": "number",

@@ -71,7 +71,10 @@ const TOOLS: ToolDef[] = [
   {
     lmName: 'foundry_readFile',
     mcpName: 'read_file',
-    label: (i) => `Reading ${s(i.file) || 'file'}`,
+    label: (i) =>
+      s(i.symbol)
+        ? `Reading ${s(i.symbol)} in ${s(i.file) || 'file'}`
+        : `Outlining ${s(i.file) || 'file'}`,
   },
 ];
 
