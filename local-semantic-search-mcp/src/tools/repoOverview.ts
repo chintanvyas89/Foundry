@@ -24,10 +24,18 @@ export function registerRepoOverviewTool(server: McpServer, store: VectorStore, 
       const g = store.graphStats();
       const u = store.usageStats();
       const im = store.implStats();
+      const cfg = store.configStats();
 
       const langs = r.languages.slice(0, 12).map((l) => `${l.ext}×${l.files}`).join(', ');
       const built = (n: number, filesBuilt: number, label: string): string =>
         filesBuilt === 0 ? `${label}: not built` : `${label}: ${n} (${filesBuilt} files scanned)`;
+
+      // Config index (embedding-free) — items + a short per-type preview.
+      const cfgTypes = cfg.byType.slice(0, 5).map((t) => `${t.type}×${t.count}`).join(', ');
+      const configLine =
+        cfg.filesBuilt === 0
+          ? '- config: not built'
+          : `- config: ${cfg.items} items from ${cfg.filesBuilt} files${cfgTypes ? ` (${cfgTypes})` : ''} — see search_config`;
 
       const idx = indexState.status();
       const indexing = idx.building
@@ -51,6 +59,7 @@ export function registerRepoOverviewTool(server: McpServer, store: VectorStore, 
         `- indexing: ${indexing}`,
         `- languages (by extension): ${langs || '(none)'}`,
         ...(standardsLine ? [standardsLine] : []),
+        configLine,
         `- ${built(s.symbols, s.filesBuilt, 'symbols')}`,
         `- ${built(g.edges, g.filesBuilt, 'call graph edges')}`,
         `- ${built(u.refs, u.filesBuilt, 'usages/references')}`,
@@ -68,6 +77,7 @@ export function registerRepoOverviewTool(server: McpServer, store: VectorStore, 
           edges: g.edges,
           refs: u.refs,
           impls: im.impls,
+          config: { items: cfg.items, filesBuilt: cfg.filesBuilt, byType: cfg.byType },
           standards: {
             frameworks: std.frameworks,
             psr4Count: std.psr4.length,

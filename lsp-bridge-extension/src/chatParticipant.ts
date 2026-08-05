@@ -18,7 +18,7 @@ const BASE_PREAMBLE = [
   'foundry_semanticSearch, foundry_searchSymbol, foundry_traceCalls,',
   'foundry_showExecutionFlow, foundry_findUsages, foundry_findImplementations,',
   'foundry_architectureOverview, foundry_repoOverview, foundry_readFile,',
-  'foundry_listDirectory, foundry_projectStandards.',
+  'foundry_listDirectory, foundry_projectStandards, foundry_searchConfig.',
   'ALWAYS ground answers in this workspace by calling these tools before answering —',
   'never guess from memory.',
   '\n\nChoosing a tool (this matters — pick by what the user gave you):',
@@ -33,6 +33,11 @@ const BASE_PREAMBLE = [
   '\n• Names a specific MODULE, DIRECTORY, or FILE? → foundry_architectureOverview',
   'with module="…" to locate it, then foundry_readFile to read its actual source. Do',
   'NOT semanticSearch a module/file name.',
+  '\n• Asks about CONFIG — Drupal views/fields/displays, routes, permissions,',
+  'services, a module’s dependencies, or any .yml setting ("which view lists X",',
+  '"what fields does the Article type have", "what handles the /foo route")? →',
+  'foundry_searchConfig (structured config is NOT in semanticSearch — it is never',
+  'embedded), then foundry_readFile for the raw YAML.',
   '\n• Describes BEHAVIOUR but not a name ("how/where is X handled")? →',
   'foundry_semanticSearch to discover it by meaning.',
   '\n\nThen DRILL into what you found instead of searching again. foundry_readFile is',
@@ -53,7 +58,9 @@ const PLAN_PREAMBLE = [
   'module architecture, the project’s own docs, the MOST RELEVANT CODE WITH FULL',
   'BODIES, the CALL SITES / USAGES of the key symbols (use these to list every',
   'file the change impacts — clients, UI, other callers — not just the definition',
-  'site), and the project’s build/test manifests. Base every claim on that context',
+  'site), any RELEVANT CONFIG (structured .yml/.json — routes, fields, services,',
+  'module dependencies — authoritative facts that are NOT in the code search), and',
+  'the project’s build/test manifests. Base every claim on that context',
   'and the actual code — do not guess from memory. If a detail (a function’s',
   'determinants, a runtime mode) is not shown in the context, say so rather than',
   'inventing it. Use ONLY the build/test commands evidenced by the provided',
@@ -725,6 +732,24 @@ async function gatherPlanContext(
   // find_usages runs against the local bridge/index: zero model credits.
   const callSites = await gatherCallSites(client, hits, output);
   if (callSites) parts.push(callSites);
+
+  // Relevant config: structured config facts (routes, fields, services, module
+  // dependencies — any .yml/.json) matching the request. Config is embedding-free,
+  // so it's absent from the semantic_search above; this grounds plans that touch
+  // config. Only included when there are actual hits (so an unbuilt config index
+  // or a code-only request adds nothing). Runs against the local index — no credits.
+  try {
+    const { text, structured } = await client.callTool('search_config', {
+      query: prompt,
+      limit: 8,
+    });
+    const cfg = (structured as { results?: unknown[] } | undefined)?.results;
+    if (Array.isArray(cfg) && cfg.length > 0 && text && text.trim()) {
+      parts.push(`#### Relevant config\n${text.trim()}`);
+    }
+  } catch (err) {
+    output.appendLine(`[chat/plan] search_config failed: ${String(err)}`);
+  }
 
   const conventions = await gatherConventions(output);
   if (conventions) parts.push(conventions);

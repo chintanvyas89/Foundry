@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { getSymbolsViaBridge } from './lspBridgeClient.js';
 import { chunkWithTreeSitter, supportsTreeSitter } from './treeSitterChunker.js';
 import { chunkByFixedWindow } from './fallbackChunker.js';
+import { isConfigFile } from '../config-index/registry.js';
 import type { Chunk } from '../types.js';
 
 // Symbol kinds worth chunking on. Deliberately excludes variables,
@@ -21,6 +22,11 @@ const CHUNK_SYMBOL_KINDS = new Set(['Function', 'Method', 'Class', 'Constructor'
  * optional enhancement, never a hard dependency of this server.
  */
 export async function chunkFile(filePath: string, workspaceRoot: string): Promise<Chunk[]> {
+  // Structured config (YAML) is NEVER embedded — it's handled by the separate,
+  // embedding-free config index. Return no chunks so it can't enter the vector
+  // store even if something calls the chunker on it directly.
+  if (isConfigFile(filePath)) return [];
+
   const bridgeSymbols = await getSymbolsViaBridge(workspaceRoot, filePath);
   if (bridgeSymbols && bridgeSymbols.length > 0) {
     const chunks = chunksFromBridgeSymbols(filePath, bridgeSymbols);

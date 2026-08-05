@@ -141,10 +141,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.15.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.15.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.15.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -169,7 +169,7 @@ absolute node path if VS Code can't find `node`). Then:
   step, click to open, cycle-guarded) — and **Uses** (references across the
   workspace), both powered by the language server.
 
-For Copilot, the server exposes eleven MCP tools: **`semantic_search`** (by
+For Copilot, the server exposes twelve MCP tools: **`semantic_search`** (by
 meaning), **`search_symbol`** (exact/partial name — callables *and* non-callable
 declarations like interfaces/enums/types once the symbol table is built),
 **`trace_calls`** (call graph, one level), **`show_execution_flow`** (multi-level
@@ -191,7 +191,10 @@ orient on the layout or find where files live, covering unindexed files too;
 depth-limited, drill in with `path="<subdir>"`), and **`project_standards`** (detected
 framework — Drupal/Symfony/Laravel — the PSR-4 namespace→directory map, and the
 enforced coding standard, read from the project's own files; see *Project standards*
-below).
+below), and **`search_config`** (keyword search over the project's structured **config**
+— Drupal `config/sync` views/fields/displays plus `*.services.yml` / `*.routing.yml` /
+`*.permissions.yml` / `*.info.yml` and any other `.yml` — parsed into facts; see
+*Config-aware search* below).
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
@@ -437,6 +440,47 @@ same reader interface and `.foundry/standards.json` already cover them.
 
 ---
 
+## Config-aware search (structured files) — never embedded
+
+Structured config carries real behaviour, but raw YAML/JSON **embeds badly** and would
+bloat the vector index. So Foundry treats config exactly like its other **embedding-free**
+indexes (symbols, call graph, usages): every structured file is parsed into **structured
+facts** (id, type, label, dependencies, key fields) written to a dedicated `config` table +
+keyword (FTS) index — **no vectors, ever.**
+
+- **Generic by default, for any project.** Out of the box it indexes **`.yml`/`.yaml`** with
+  a **format-agnostic** summarizer (works on YAML *and* JSON): id, top-level keys, labels,
+  dependencies. No framework assumptions — good for any codebase.
+- **Reachable everywhere it matters, out of `semantic_search`.** Query it with the
+  **`search_config`** tool (ranked exact-id > id/label > keyword, optional `type=` filter)
+  or via `@codebase` — e.g. *"which view lists published articles"*, *"what handles the
+  `/foo` route"*, *"what does the X module depend on"*. `read_file` still serves the raw
+  file on demand. Config is kept **out of the vector `semantic_search` path** so it never
+  crowds code results.
+- **Per-project config — `.foundry/config.json`.** Declare which extensions count as
+  structured config and which type-specific **reader packs** to enable:
+
+  ```json
+  {
+    "configExtensions": [".yml", ".yaml", ".json"],
+    "configReaders": ["drupal"]
+  }
+  ```
+
+  `configExtensions` defaults to YAML; add `.json` (or others) to pull them in. When
+  `configReaders` is omitted, packs are **auto-enabled from the detected framework** — so a
+  Drupal repo gets rich config facts with zero configuration.
+- **Opt-in reader packs.** Type-specific readers live under
+  [`local-semantic-search-mcp/src/config-index/packs/`](local-semantic-search-mcp/src/config-index/packs/)
+  — the built-in **`drupal`** pack understands views/fields/displays/services/routing/
+  permissions/info. Add a pack = a folder + one line; add a format = one branch in the
+  parser. Nothing framework-specific sits in the core.
+- **Build it** with `SWE_BUILD_CONFIG=1` (or `SWE_BUILD_ALL=1`); it needs **no LSP bridge**
+  (pure parsing) and runs incrementally. Config is never chunked or embedded — the indexer
+  routes the configured extensions to this index and evicts any a prior version had embedded.
+
+---
+
 ## Verifying it works
 
 - **Quickest (no VS Code):** from `local-semantic-search-mcp/`, run
@@ -483,7 +527,7 @@ once:
    and `node_modules/` are gitignored, so this step is always local.)
 2. **Install the extension** (needed to *build/refresh* indexes or use the search
    panel; not needed to just query a shared index): `code --install-extension
-   lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix`. The `.vsix` **is**
+   lsp-bridge-extension/swe-search-lsp-bridge-0.9.15.vsix`. The `.vsix` **is**
    committed, so it's already in the clone.
 3. **Config is committed.** `.vscode/mcp.json` uses `${workspaceFolder}`, so it
    works as-is — no per-machine edits.

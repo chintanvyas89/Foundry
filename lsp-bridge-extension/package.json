@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.14",
+  "version": "0.9.15",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -363,6 +363,36 @@
               "description": "Include the full PSR-4 map (default true)."
             }
           }
+        }
+      },
+      {
+        "name": "foundry_searchConfig",
+        "displayName": "Foundry: search config",
+        "modelDescription": "Search the project's structured CONFIG (YAML) — Drupal config/sync views, fields, form/view displays, and *.services.yml / *.routing.yml / *.permissions.yml / *.info.yml, plus any other .yml. Config is NEVER embedded, so it is NOT in foundry_semanticSearch — this is how you reach it. Use for questions like 'which view lists published articles', 'what fields does the Article type have', 'what handles the /market/activity route', 'what does the market module depend on'. Returns items ranked exact-id > id/label > keyword, each with id, type, file:line and a facts summary (open the file with foundry_readFile for the raw YAML). Optionally filter by type (view, field, service, route, permission, module_info, …). Offline; needs the config index built.",
+        "icon": "$(settings-gear)",
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Config id, label, or keywords, e.g. \"frontpage\", \"article body\", \"activity route\"."
+            },
+            "type": {
+              "type": "string",
+              "description": "Optional: restrict to one config type, e.g. \"view\", \"field\", \"service\", \"route\", \"permission\"."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Max results (default 10)."
+            }
+          },
+          "required": [
+            "query"
+          ]
         }
       }
     ],

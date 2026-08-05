@@ -13,6 +13,9 @@ import { buildCallGraph, updateFileGraph } from './indexing/graphBuilder.js';
 import { buildSymbols, updateFileSymbols } from './indexing/symbolBuilder.js';
 import { buildUsages, updateFileUsages } from './indexing/usageBuilder.js';
 import { buildImpls, updateFileImpls } from './indexing/implsBuilder.js';
+import { buildConfig, updateFileConfig } from './indexing/configBuilder.js';
+import { isConfigFile } from './config-index/registry.js';
+import { initConfigIndex } from './config-index/settings.js';
 import { relative, sep } from 'node:path';
 import { acquireLock } from './lock.js';
 import { registerSemanticSearchTool } from './tools/semanticSearch.js';
@@ -25,6 +28,7 @@ import { registerArchitectureOverviewTool } from './tools/architectureOverview.j
 import { registerReadFileTool } from './tools/readFile.js';
 import { registerListDirectoryTool } from './tools/listDirectory.js';
 import { registerProjectStandardsTool } from './tools/projectStandards.js';
+import { registerSearchConfigTool } from './tools/searchConfig.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -119,6 +123,15 @@ async function main() {
       );
     }
 
+    // Resolve which extensions are structured config (and which reader packs are
+    // enabled) for this workspace BEFORE indexing, so the indexer/chunker keep
+    // config out of the vector store from the first file.
+    const cfgIndex = initConfigIndex(workspaceRoot);
+    console.error(
+      `[swe-search] config index: extensions ${cfgIndex.extensions.join(', ')}` +
+        `${cfgIndex.packs.length ? ` · packs ${cfgIndex.packs.join(', ')}` : ' · packs (none — generic only)'}`,
+    );
+
     const indexer = new Indexer(workspaceRoot, store, config.exclude);
     console.error('[swe-search] building initial index...');
     const startAt = Date.now();
@@ -190,6 +203,16 @@ async function main() {
     // the bridge is reachable). Embedding-free.
     const onFileIndexed = (absPath: string) => {
       const rel = relative(workspaceRoot, absPath).split(sep).join('/');
+      // Config (YAML) never enters the code indexes — keep only the embedding-free
+      // config index current (no-op until it's been built).
+      if (isConfigFile(rel)) {
+        try {
+          updateFileConfig(workspaceRoot, store, rel);
+        } catch (err) {
+          console.error(`[swe-search] config: incremental update failed for ${rel}:`, err);
+        }
+        return;
+      }
       void updateFileGraph(workspaceRoot, store, rel).catch((err) =>
         console.error(`[swe-search] call graph: incremental update failed for ${rel}:`, err),
       );
@@ -242,6 +265,13 @@ async function main() {
     total: () => number;
   }> = [
     {
+      // Config parses YAML only — no LSP bridge, so it's listed first and always
+      // completes even when the bridge-backed builds below abort.
+      flag: 'SWE_BUILD_CONFIG', label: 'config', unit: 'items',
+      run: (onProgress) => buildConfig(workspaceRoot, store, { delayMs: 2, onProgress }),
+      total: () => store.configStats().items,
+    },
+    {
       flag: 'SWE_BUILD_SYMBOLS', label: 'symbols', unit: 'symbols',
       run: (onProgress) => buildSymbols(workspaceRoot, store, { delayMs: 5, onProgress }),
       total: () => store.symbolStats().symbols,
@@ -272,8 +302,8 @@ async function main() {
       await indexState.indexComplete;
       if (buildAll) {
         console.error(
-          '[swe-search] build-all: symbols → call graph → usages → implementations ' +
-            '(one-time, needs the VS Code LSP bridge running)...',
+          '[swe-search] build-all: config → symbols → call graph → usages → implementations ' +
+            '(one-time; config needs no bridge, the rest need the VS Code LSP bridge running)...',
         );
       }
       for (const b of selected) {
@@ -338,6 +368,9 @@ async function main() {
   registerListDirectoryTool(server, workspaceRoot, config.exclude);
 
   registerProjectStandardsTool(server, workspaceRoot);
+
+  // Keyword search over the embedding-free config index (YAML is never embedded).
+  registerSearchConfigTool(server, store, workspaceRoot);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

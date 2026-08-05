@@ -2,6 +2,7 @@ import { readdirSync, statSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { buildIgnoreMatcher, isIgnored, type Ignore } from '../ignore/ignoreMatcher.js';
+import { isConfigFile } from '../config-index/registry.js';
 import { chunkFile } from '../chunking/chunker.js';
 import { embedBatch } from '../embedding/embedder.js';
 import { VectorStore } from '../storage/store.js';
@@ -123,6 +124,17 @@ export class Indexer {
     }
     const fileHash = createHash('sha1').update(content).digest('hex');
     const relPath = this.toRel(absPath);
+
+    // YAML/structured config is served by the embedding-free config index, never
+    // the vector store. Skip it here — and evict any chunks a prior version
+    // embedded (before this routing existed) — so config never enters semantic
+    // search. Checked BEFORE the hash-skip so leaked chunks are removed even when
+    // the file is otherwise unchanged.
+    if (isConfigFile(relPath)) {
+      this.store.deleteByFile(relPath);
+      this.store.deleteFileHash(relPath);
+      return { total: 0, embedded: 0, skipped: true };
+    }
 
     if (this.store.getFileHash(relPath) === fileHash) {
       return { total: this.store.countByFile(relPath), embedded: 0, skipped: true };

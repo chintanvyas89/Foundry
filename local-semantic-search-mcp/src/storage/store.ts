@@ -148,6 +148,50 @@ CREATE TABLE IF NOT EXISTS impl_files (
 );
 `;
 
+// Persisted config index (embedding-free — YAML is NEVER embedded). Populated by
+// an explicit one-time build (SWE_BUILD_CONFIG) that parses every project
+// `.yml`/`.yaml` into structured facts, so config is searchable/answerable
+// through `search_config` and `@codebase` WITHOUT entering the vector path. Each
+// row is one config item: `id` (e.g. `views.view.frontpage`), `type` (view,
+// field, service, …), optional `label`/`deps`, and `facts` (a synthesized
+// natural-language summary + key tokens for keyword search). Paths are
+// workspace-relative (like chunks). `config_files` tracks which files have been
+// summarized (same fileHash as `files`), making the build resumable/incremental.
+const CONFIG_SCHEMA = `
+CREATE TABLE IF NOT EXISTS config (
+  file TEXT NOT NULL,
+  id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  label TEXT,
+  deps TEXT,
+  facts TEXT NOT NULL,
+  startLine INTEGER NOT NULL,
+  PRIMARY KEY (file, id, startLine)
+);
+CREATE INDEX IF NOT EXISTS idx_config_id ON config(id);
+CREATE INDEX IF NOT EXISTS idx_config_type ON config(type);
+CREATE TABLE IF NOT EXISTS config_files (
+  path TEXT PRIMARY KEY,
+  fileHash TEXT NOT NULL
+);
+`;
+
+// Lexical index over config items — the config counterpart of `chunks_fts`, kept
+// SEPARATE so config text never perturbs code-search ranking. `cid` holds the
+// owning `config` row's rowid (as text) to join back; `file` is stored for
+// per-file deletes. Created in the same FTS5 try/catch as chunks_fts, so a
+// locked-down sqlite without FTS5 degrades to LIKE-based config search.
+const CONFIG_FTS_SCHEMA = `
+CREATE VIRTUAL TABLE IF NOT EXISTS config_fts USING fts5(
+  cid UNINDEXED,
+  file UNINDEXED,
+  id,
+  label,
+  facts,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+`;
+
 // Paths in `chunks.file` / `chunks.id` / `files.path` are stored RELATIVE to
 // the workspace root (forward-slash separated). That keeps the index portable
 // between machines/checkouts, so it can be shared without every dev re-indexing.
@@ -179,8 +223,10 @@ export class VectorStore {
     this.db.exec(SYMBOL_SCHEMA);
     this.db.exec(USAGE_SCHEMA);
     this.db.exec(IMPL_SCHEMA);
+    this.db.exec(CONFIG_SCHEMA);
     try {
       this.db.exec(FTS_SCHEMA);
+      this.db.exec(CONFIG_FTS_SCHEMA);
       this.ftsEnabled = true;
     } catch {
       // No FTS5 in this sqlite build — searchText returns nothing and
@@ -801,6 +847,169 @@ export class VectorStore {
     return rows;
   }
 
+  // ---- Config index (embedding-free — YAML is never embedded) ----------------
+
+  // Replace a file's config items. Delete-then-insert in one transaction so a
+  // rescan leaves no stale rows (mirrors upsertSymbols). Keeps config_fts in
+  // sync: each inserted row's rowid is mirrored into config_fts.cid so search
+  // can join back. INSERT OR IGNORE tolerates a file that declares the same id
+  // twice at one line.
+  replaceConfig(file: string, rows: ConfigRow[]): void {
+    const delC = this.db.prepare('DELETE FROM config WHERE file = ?');
+    const delF = this.ftsEnabled
+      ? this.db.prepare('DELETE FROM config_fts WHERE file = ?')
+      : null;
+    const insC = this.db.prepare(
+      'INSERT OR IGNORE INTO config (file, id, type, label, deps, facts, startLine) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    );
+    const insF = this.ftsEnabled
+      ? this.db.prepare('INSERT INTO config_fts (cid, file, id, label, facts) VALUES (?, ?, ?, ?, ?)')
+      : null;
+    this.db.exec('BEGIN');
+    try {
+      delC.run(file);
+      if (delF) delF.run(file);
+      for (const r of rows) {
+        const res = insC.run(
+          file,
+          r.id,
+          r.type,
+          r.label ?? null,
+          r.deps ?? null,
+          r.facts,
+          r.startLine,
+        );
+        if (insF && res.changes > 0) {
+          insF.run(
+            String(res.lastInsertRowid),
+            file,
+            ftsAugment(r.id),
+            r.label ? ftsAugment(r.label) : '',
+            ftsAugment(r.facts),
+          );
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  deleteConfigForFile(file: string): void {
+    this.db.prepare('DELETE FROM config WHERE file = ?').run(file);
+    if (this.ftsEnabled) {
+      this.db.prepare('DELETE FROM config_fts WHERE file = ?').run(file);
+    }
+  }
+
+  // Rank config items for a query, tiered exact-id > id/label substring > facts
+  // keyword (bm25 via config_fts). Deterministic and offline; degrades to pure
+  // LIKE when FTS5 is unavailable. `type` optionally constrains to one kind.
+  searchConfig(
+    query: string,
+    opts: { type?: string; cap?: number } = {},
+  ): ConfigSearchRow[] {
+    const { type, cap = 30 } = opts;
+    const q = query.trim();
+    if (!q) return [];
+    const cols = 'file, id, type, label, deps, facts, startLine';
+    const typeClause = type ? ' AND type = ?' : '';
+    const typeArg = type ? [type] : [];
+    const results = new Map<string, ConfigSearchRow>();
+    const add = (rows: ConfigSearchRow[]): void => {
+      for (const r of rows) {
+        const key = `${r.file} ${r.id} ${r.startLine}`;
+        if (!results.has(key)) results.set(key, r);
+      }
+    };
+    const esc = q.replace(/[\\%_]/g, (m) => `\\${m}`);
+    // 1) exact id (case-insensitive)
+    add(
+      this.db
+        .prepare(`SELECT ${cols} FROM config WHERE id = ? COLLATE NOCASE${typeClause} LIMIT ?`)
+        .all(q, ...typeArg, cap) as unknown as ConfigSearchRow[],
+    );
+    // 2) id substring
+    add(
+      this.db
+        .prepare(`SELECT ${cols} FROM config WHERE id LIKE ? ESCAPE '\\'${typeClause} LIMIT ?`)
+        .all(`%${esc}%`, ...typeArg, cap) as unknown as ConfigSearchRow[],
+    );
+    // 3) label substring
+    add(
+      this.db
+        .prepare(
+          `SELECT ${cols} FROM config WHERE label LIKE ? ESCAPE '\\'${typeClause} LIMIT ?`,
+        )
+        .all(`%${esc}%`, ...typeArg, cap) as unknown as ConfigSearchRow[],
+    );
+    // 4) facts/label keyword match via FTS5 (bm25-ranked), when available
+    if (this.ftsEnabled && results.size < cap) {
+      const match = toFtsMatch(q);
+      if (match) {
+        try {
+          add(
+            this.db
+              .prepare(
+                `SELECT c.file, c.id, c.type, c.label, c.deps, c.facts, c.startLine
+                   FROM config_fts JOIN config c ON c.rowid = CAST(config_fts.cid AS INTEGER)
+                  WHERE config_fts MATCH ?${type ? ' AND c.type = ?' : ''}
+                  ORDER BY bm25(config_fts)
+                  LIMIT ?`,
+              )
+              .all(match, ...typeArg, cap) as unknown as ConfigSearchRow[],
+          );
+        } catch {
+          // Malformed MATCH — skip the lexical arm, keep the LIKE results.
+        }
+      }
+    }
+    return [...results.values()].slice(0, cap);
+  }
+
+  getConfigFileHash(file: string): string | null {
+    const row = this.db.prepare('SELECT fileHash FROM config_files WHERE path = ?').get(file) as
+      | { fileHash: string }
+      | undefined;
+    return row?.fileHash ?? null;
+  }
+
+  setConfigFileHash(file: string, hash: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO config_files (path, fileHash) VALUES (?, ?)')
+      .run(file, hash);
+  }
+
+  deleteConfigFile(file: string): void {
+    this.db.prepare('DELETE FROM config_files WHERE path = ?').run(file);
+  }
+
+  // Every file summarized into the config index (workspace-relative). Used by the
+  // config build to prune items for files that were deleted / no longer match.
+  listConfigFiles(): string[] {
+    return (
+      this.db.prepare('SELECT path FROM config_files ORDER BY path').all() as Array<{
+        path: string;
+      }>
+    ).map((r) => r.path);
+  }
+
+  // Item count, files summarized, and a per-type breakdown — for build progress
+  // and the repo_overview one-liner.
+  configStats(): { items: number; filesBuilt: number; byType: Array<{ type: string; count: number }> } {
+    const items = (this.db.prepare('SELECT COUNT(*) AS c FROM config').get() as { c: number }).c;
+    const filesBuilt = (
+      this.db.prepare('SELECT COUNT(*) AS c FROM config_files').get() as { c: number }
+    ).c;
+    const byType = (
+      this.db
+        .prepare('SELECT type, COUNT(*) AS c FROM config GROUP BY type ORDER BY c DESC')
+        .all() as Array<{ type: string; c: number }>
+    ).map((r) => ({ type: r.type, count: r.c }));
+    return { items, filesBuilt, byType };
+  }
+
   // ---- Persisted usages / references (embedding-free) ------------------------
 
   // Insert reference rows, ignoring exact duplicates. `viaFile` records the file
@@ -1030,6 +1239,23 @@ export interface SymbolImpl {
   implLine: number;
   implText: string;
   viaFile: string;
+}
+
+// One config item to persist (see CONFIG_SCHEMA). `facts` is the synthesized
+// natural-language summary + key tokens; `deps` is a compact rendering of the
+// item's declared dependencies. Never embedded.
+export interface ConfigRow {
+  id: string;
+  type: string;
+  label?: string | null;
+  deps?: string | null;
+  facts: string;
+  startLine: number;
+}
+
+// A config search hit — a ConfigRow plus its workspace-relative `file`.
+export interface ConfigSearchRow extends ConfigRow {
+  file: string;
 }
 
 // A directed caller -> callee edge, tagged with the file whose symbol produced

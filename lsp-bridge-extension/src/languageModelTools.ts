@@ -86,6 +86,11 @@ const TOOLS: ToolDef[] = [
     mcpName: 'project_standards',
     label: () => 'Detecting project standards',
   },
+  {
+    lmName: 'foundry_searchConfig',
+    mcpName: 'search_config',
+    label: (i) => `Searching config for “${s(i.query) || 'config'}”`,
+  },
 ];
 
 /** LM tool names we own — used by the participant to filter the tool list. */

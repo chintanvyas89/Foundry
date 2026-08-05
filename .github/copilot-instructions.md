@@ -137,11 +137,17 @@ locked-down setups), use **`#foundryCodebase`** to pull code context from the
 local, offline Foundry index instead — it's the drop-in replacement, backed by the
 same `semantic_search` above. The deeper `foundry_*` Language Model tools
 (`foundry_traceCalls`, `foundry_findUsages`, `foundry_architectureOverview`,
-`foundry_readFile`, `foundry_listDirectory`, `foundry_projectStandards`, …) expose the
+`foundry_readFile`, `foundry_listDirectory`, `foundry_projectStandards`,
+`foundry_searchConfig`, …) expose the
 rest of the toolset for agent mode. Route by what you're given: a known **symbol name**
 → `foundry_searchSymbol`; a named **module / directory / file** →
 `foundry_architectureOverview(module=…)` to locate it, then `foundry_readFile` to read
-its actual source; described **behaviour** with no name → `foundry_semanticSearch`. Then
+its actual source; described **behaviour** with no name → `foundry_semanticSearch`;
+a question about **config** — any structured config file (`.yml`/`.json`, and whatever a
+project declares in `.foundry/config.json`), e.g. Drupal views/fields/displays, routes,
+permissions, services, or a module's dependencies → `foundry_searchConfig` — structured
+config is **never embedded**, so it isn't in `semantic_search`; this is how you reach it,
+then `foundry_readFile` for the raw file. Then
 drill into the concrete hits (read the file, or `semantic_search` `expand=[…]`) rather
 than re-searching with reworded queries. On a **PHP/Drupal** repo, `foundry_readFile`
 accepts a **fully-qualified class name** (`Drupal\market\Entity\Foo`) and resolves it to
