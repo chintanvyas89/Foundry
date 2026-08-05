@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -317,6 +317,33 @@
           "required": [
             "file"
           ]
+        }
+      },
+      {
+        "name": "foundry_listDirectory",
+        "displayName": "Foundry: directory structure",
+        "modelDescription": "List the workspace directory STRUCTURE recursively — a file/folder tree that respects .gitignore/.sweignore (no node_modules/.git noise). Use to orient on an unfamiliar repo, see its layout, or find where files/dirs live (covers unindexed files too). Call with no path for the repo root; it is depth-limited, so drill into a branch by calling again with path=\"<subdir>\" and/or a larger depth. Folders cut off by the depth limit are marked \"/…\".",
+        "icon": "$(list-tree)",
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Directory to list — absolute or workspace-relative. Omit for the repo root."
+            },
+            "depth": {
+              "type": "number",
+              "description": "How many levels deep to walk (default 3, max 10)."
+            },
+            "maxEntries": {
+              "type": "number",
+              "description": "Cap on total entries returned (default 400)."
+            }
+          }
         }
       }
     ],

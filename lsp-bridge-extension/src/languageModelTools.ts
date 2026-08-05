@@ -76,6 +76,11 @@ const TOOLS: ToolDef[] = [
         ? `Reading ${s(i.symbol)} in ${s(i.file) || 'file'}`
         : `Outlining ${s(i.file) || 'file'}`,
   },
+  {
+    lmName: 'foundry_listDirectory',
+    mcpName: 'list_directory',
+    label: (i) => `Listing ${s(i.path) || 'the workspace'}`,
+  },
 ];
 
 /** LM tool names we own — used by the participant to filter the tool list. */

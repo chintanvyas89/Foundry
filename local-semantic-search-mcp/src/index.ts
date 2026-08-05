@@ -23,6 +23,7 @@ import { registerSymbolRefTools } from './tools/symbolRefs.js';
 import { registerRepoOverviewTool } from './tools/repoOverview.js';
 import { registerArchitectureOverviewTool } from './tools/architectureOverview.js';
 import { registerReadFileTool } from './tools/readFile.js';
+import { registerListDirectoryTool } from './tools/listDirectory.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -332,6 +333,8 @@ async function main() {
   registerArchitectureOverviewTool(server, store);
 
   registerReadFileTool(server, workspaceRoot);
+
+  registerListDirectoryTool(server, workspaceRoot, config.exclude);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
