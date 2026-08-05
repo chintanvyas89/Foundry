@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.15",
+  "version": "0.9.16",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -394,6 +394,28 @@
             "query"
           ]
         }
+      },
+      {
+        "name": "foundry_plan",
+        "displayName": "Foundry: plan a change",
+        "modelDescription": "Produce a grounded implementation plan for a described change using the local Foundry index. Returns a DETERMINISTIC context pack — index/architecture overview, the most relevant code with FULL bodies, the project's own docs, relevant structured config, call-sites/usages of the key symbols (downstream impact), and the real build/test manifests — followed by a plan template to fill in. Use this when you need to plan HOW to implement a change (scope, files to touch, steps, risks, verify commands) grounded in this workspace, e.g. after taking over a task in agent mode. It does not edit files or run commands. Offline; needs the local index built.",
+        "icon": "$(checklist)",
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "request": {
+              "type": "string",
+              "description": "The change to plan, in plain language, e.g. \"add a retry with backoff to the fetch path\" or \"add a new field to the Article content type\"."
+            }
+          },
+          "required": [
+            "request"
+          ]
+        }
       }
     ],
     "viewsContainers": {
@@ -429,6 +451,11 @@
         "command": "sweSearch.focusPanel",
         "title": "Open search panel",
         "category": "Semantic Search"
+      },
+      {
+        "command": "foundry.implementPlan",
+        "title": "Implement plan in agent mode",
+        "category": "Foundry"
       }
     ],
     "menus": {
@@ -437,6 +464,12 @@
           "command": "sweSearch.findSimilar",
           "when": "editorHasSelection",
           "group": "navigation@99"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "foundry.implementPlan",
+          "when": "false"
         }
       ]
     },

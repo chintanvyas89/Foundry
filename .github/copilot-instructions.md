@@ -138,7 +138,7 @@ local, offline Foundry index instead — it's the drop-in replacement, backed by
 same `semantic_search` above. The deeper `foundry_*` Language Model tools
 (`foundry_traceCalls`, `foundry_findUsages`, `foundry_architectureOverview`,
 `foundry_readFile`, `foundry_listDirectory`, `foundry_projectStandards`,
-`foundry_searchConfig`, …) expose the
+`foundry_searchConfig`, `foundry_plan`, …) expose the
 rest of the toolset for agent mode. Route by what you're given: a known **symbol name**
 → `foundry_searchSymbol`; a named **module / directory / file** →
 `foundry_architectureOverview(module=…)` to locate it, then `foundry_readFile` to read
@@ -152,8 +152,17 @@ drill into the concrete hits (read the file, or `semantic_search` `expand=[…]`
 than re-searching with reworded queries. On a **PHP/Drupal** repo, `foundry_readFile`
 accepts a **fully-qualified class name** (`Drupal\market\Entity\Foo`) and resolves it to
 the file; `foundry_projectStandards` reports the framework + PSR-4 namespace→directory
-map + coding standard. There's also a `@codebase` chat
+map + coding standard. Need a plan for a change (scope, files to touch, steps, risks,
+verify commands) grounded in this workspace? → `foundry_plan` — it returns a deterministic
+context pack (overview, most-relevant code with full bodies, relevant config, call-sites,
+build/test manifests) plus a plan template; it does not edit files.
+
+There's also a `@codebase` chat
 participant that answers workspace questions by driving these tools itself. For a
 visual overview, `@codebase /arch` renders a Mermaid module dependency graph and
 `@codebase /graph <symbol>` renders a Mermaid call graph (both offline, no model
-call).
+call). `@codebase`/`@codebase /plan` answers end with an **⚡ Implement in agent mode**
+button that hands the plan to VS Code's built-in agent for execution (`@codebase` is
+read-only). After that hand-off you (the agent) **cannot re-invoke the `@codebase`
+participant or its `/plan` command** — instead re-search with the `foundry_*` tools /
+`#foundryCodebase` and re-plan with `foundry_plan`.

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { SearchClient } from './searchClient';
+import { gatherPlanContext, PLAN_PREAMBLE } from './planContext';
 
 // Registers our local MCP tools as VS Code Language Model Tools, so Copilot's
 // own chat / agent mode (and our @codebase participant) can call them. Every
@@ -137,5 +138,41 @@ export function registerLanguageModelTools(
     context.subscriptions.push(vscode.lm.registerTool(def.lmName, tool));
   }
 
-  output.appendLine(`[lm-tools] registered ${TOOLS.length} Foundry Language Model tools.`);
+  // foundry_plan is registered separately: unlike the TOOLS above (each a single
+  // callTool), it orchestrates several local calls via gatherPlanContext to build
+  // a deterministic plan-context pack. It makes NO model call of its own — it
+  // returns the context + plan template for the CALLING model (e.g. the built-in
+  // agent after a hand-off) to write the plan from. This is the agent-mode
+  // equivalent of the @codebase /plan command, which the agent cannot invoke.
+  const planTool: vscode.LanguageModelTool<{ request?: unknown }> = {
+    async invoke(options, token) {
+      void token;
+      const request = s((options.input ?? {}).request) || 'the requested change';
+      try {
+        const { seed } = await gatherPlanContext(client, request, output);
+        const body = seed
+          ? `${PLAN_PREAMBLE}\n\nChange requested: ${request}\n\n${seed}\n\n` +
+            'Write the plan from the context above using those sections; do not call tools for this.'
+          : `${PLAN_PREAMBLE}\n\nChange requested: ${request}\n\n` +
+            '(No workspace context could be gathered — is the local index built and ' +
+            '"sweSearch.serverEntry" set? Plan from the request alone, noting what is unverified.)';
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(body)]);
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        output.appendLine(`[lm-tool foundry_plan] ${m}`);
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `Foundry local search is unavailable: ${m}. ` +
+              'Check the "sweSearch.serverEntry" setting and that the index is built.',
+          ),
+        ]);
+      }
+    },
+    prepareInvocation(options) {
+      return { invocationMessage: `Planning: ${s((options.input ?? {}).request) || 'the change'}` };
+    },
+  };
+  context.subscriptions.push(vscode.lm.registerTool('foundry_plan', planTool));
+
+  output.appendLine(`[lm-tools] registered ${TOOLS.length + 1} Foundry Language Model tools.`);
 }

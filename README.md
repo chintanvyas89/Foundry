@@ -31,7 +31,8 @@ exactly as they would in any normal chat turn.
 | 🗺️ **Architecture overview** | Deterministic module-level map: modules, dependencies, entry points, and reference hotspots — no LLM, no re-index. |
 | 💬 **`@codebase` chat participant** | Ask the workspace anything inside Copilot Chat; it agentically drives the local tools and answers with grounded, clickable references. |
 | 📋 **`/plan` & `/arch` & `/graph`** | Grounded implementation plans (with change-impact blast radius), plus native Mermaid module & call-graph diagrams. |
-| 🧩 **`#foundryCodebase` LM tools** | Drop-in replacement for a disabled `#codebase` inside Copilot's own chat and agent mode. |
+| ⚡ **Hand off to agent mode** | Every `@codebase`/`/plan` answer ends with an **Implement in agent mode** button that pushes the plan to VS Code's built-in agent for execution — `@codebase` stays read-only. |
+| 🧩 **`#foundryCodebase` LM tools** | Drop-in replacement for a disabled `#codebase` inside Copilot's own chat and agent mode — including `foundry_plan`, so the agent can re-plan mid-implementation. |
 | ⚡ **Lazy indexing** | Search opens in seconds — recently-edited files embed first, partial results stream while the rest indexes. |
 | 🤝 **Shareable index** | Build once, share the portable `index.db`; teammates reuse it offline with zero re-embedding. |
 

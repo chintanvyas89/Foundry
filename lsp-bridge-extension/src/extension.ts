@@ -45,6 +45,43 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('sweSearch.focusPanel', () =>
       vscode.commands.executeCommand('sweSearch.panel.focus'),
     ),
+    // Hand off a plan/answer from @codebase (read-only) to VS Code's built-in
+    // agent mode (which has edit/terminal tools). Invoked by the "⚡ Implement in
+    // agent mode" button rendered in @codebase responses. The agent can still
+    // call the foundry_* tools / foundry_plan for more search and planning.
+    vscode.commands.registerCommand(
+      'foundry.implementPlan',
+      async (payload?: string | { request?: string; content?: string }) => {
+      // Accept the structured payload from the button, or a bare string (older
+      // buttons / manual invocation).
+      const request = typeof payload === 'object' ? (payload?.request ?? '').trim() : '';
+      const content = (typeof payload === 'string' ? payload : payload?.content ?? '').trim();
+      if (!content) {
+        vscode.window.showInformationMessage('Nothing to implement — no plan text was captured.');
+        return;
+      }
+      // Lead with the user's ORIGINAL request so the agent grounds on their real
+      // intent, then the derived plan/answer, then how to fetch more context.
+      const query = [
+        request ? `Original request: ${request}` : '',
+        'Implement the following plan/answer. Use #foundryCodebase / the foundry_* tools ' +
+          '(and foundry_plan) for any lookups or further planning:',
+        content,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      try {
+        // `mode: 'agent'` is honoured on recent VS Code; older builds ignore/reject it.
+        await vscode.commands.executeCommand('workbench.action.chat.open', { query, mode: 'agent' });
+      } catch {
+        try {
+          await vscode.commands.executeCommand('workbench.action.chat.open', { query });
+          vscode.window.showInformationMessage('Switch the chat to Agent mode to execute this plan.');
+        } catch (err) {
+          vscode.window.showWarningMessage(`Couldn't open chat for implementation: ${String(err)}`);
+        }
+      }
+    }),
   );
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
