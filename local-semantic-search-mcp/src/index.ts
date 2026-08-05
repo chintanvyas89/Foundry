@@ -22,6 +22,7 @@ import { registerExecutionFlowTool } from './tools/showExecutionFlow.js';
 import { registerSymbolRefTools } from './tools/symbolRefs.js';
 import { registerRepoOverviewTool } from './tools/repoOverview.js';
 import { registerArchitectureOverviewTool } from './tools/architectureOverview.js';
+import { registerReadFileTool } from './tools/readFile.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -329,6 +330,8 @@ async function main() {
   // Deterministic module-level architecture map — aggregates the persisted
   // symbols/usages/graph indexes; no gate, no re-index.
   registerArchitectureOverviewTool(server, store);
+
+  registerReadFileTool(server, workspaceRoot);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

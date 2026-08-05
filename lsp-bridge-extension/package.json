@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -279,6 +279,36 @@
         "inputSchema": {
           "type": "object",
           "properties": {}
+        }
+      },
+      {
+        "name": "foundry_readFile",
+        "displayName": "Foundry: read file",
+        "modelDescription": "Read the actual contents of a workspace file (with line numbers). Use this to read the EXACT file/module located via search_symbol, architecture_overview, or a semantic_search hit — e.g. to explain how a named module works from real source, not fuzzy snippets. Accepts an absolute or workspace-relative path; optional startLine/endLine (large files are capped, request a range for more).",
+        "icon": "$(file-code)",
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "File to read — absolute or workspace-relative (e.g. \"src/storage/store.ts\")."
+            },
+            "startLine": {
+              "type": "number",
+              "description": "1-based first line to read (default 1)."
+            },
+            "endLine": {
+              "type": "number",
+              "description": "1-based last line to read (inclusive)."
+            }
+          },
+          "required": [
+            "file"
+          ]
         }
       }
     ],

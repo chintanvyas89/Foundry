@@ -14,14 +14,27 @@ const MAX_TOOL_ROUNDS = 5;
 
 const BASE_PREAMBLE = [
   'You are @codebase, a coding assistant for the user’s CURRENT VS Code workspace.',
-  'A local, offline code index is available through the foundry_* tools',
-  '(foundry_semanticSearch, foundry_searchSymbol, foundry_traceCalls,',
+  'A local, offline code index is available through the foundry_* tools:',
+  'foundry_semanticSearch, foundry_searchSymbol, foundry_traceCalls,',
   'foundry_showExecutionFlow, foundry_findUsages, foundry_findImplementations,',
-  'foundry_architectureOverview, foundry_repoOverview).',
+  'foundry_architectureOverview, foundry_repoOverview, foundry_readFile.',
   'ALWAYS ground answers in this workspace by calling these tools before answering —',
-  'do not guess from memory. Prefer foundry_semanticSearch to locate code by meaning,',
-  'then foundry_traceCalls / foundry_findUsages to follow relationships.',
-  'Cite concrete files as `path:line`. Be concise and specific to this codebase.',
+  'never guess from memory.',
+  '\n\nChoosing a tool (this matters — pick by what the user gave you):',
+  '\n• Names a specific SYMBOL (function/class/type/constant)? → foundry_searchSymbol',
+  '(an exact name lookup). Do NOT use semanticSearch to find something named exactly.',
+  '\n• Names a specific MODULE, DIRECTORY, or FILE? → foundry_architectureOverview',
+  'with module="…" to locate it, then foundry_readFile to read its actual source. Do',
+  'NOT semanticSearch a module/file name.',
+  '\n• Describes BEHAVIOUR but not a name ("how/where is X handled")? →',
+  'foundry_semanticSearch to discover it by meaning.',
+  '\n\nThen DRILL into what you found instead of searching again: read the concrete',
+  'files with foundry_readFile (or foundry_semanticSearch expand=[…] for full bodies),',
+  'and follow relationships with foundry_traceCalls / foundry_findUsages. To iterate a',
+  'search, prefer mode:"refine"/"expand" or pinResults (cheap — reuses results). Re-run',
+  'a fresh semanticSearch only for a genuinely different question, or when the first',
+  'pass clearly missed — not to reword the same intent.',
+  '\n\nCite concrete files as `path:line`. Be specific to this codebase.',
 ].join(' ');
 
 const PLAN_PREAMBLE = [
@@ -277,6 +290,20 @@ async function runAgentic(
     .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
 
   const messages = buildMessages(preamble, request, chatContext);
+  // Unlike built-in Copilot, a third-party participant's raw model.sendRequest does
+  // NOT inherit the workspace's custom instructions. Fold them in so team/project
+  // conventions reach the model too — supplementary to our (authoritative) routing.
+  const conventions = await loadProjectConventions();
+  if (conventions) {
+    messages.splice(
+      1,
+      0,
+      vscode.LanguageModelChatMessage.User(
+        'Project conventions from this workspace (supplementary context; the tool-routing ' +
+          `guidance above remains authoritative):\n\n${conventions}`,
+      ),
+    );
+  }
   const usedTools = new Set<string>();
   const seenCalls = new Set<string>(); // (tool, input) already run this turn — skip repeats
   const refs = new Set<string>();
@@ -353,7 +380,7 @@ async function runAgentic(
       try {
         result = await vscode.lm.invokeTool(
           call.name,
-          { input: call.input, toolInvocationToken: request.toolInvocationToken },
+          { input: boostSearchInput(call.name, call.input), toolInvocationToken: request.toolInvocationToken },
           token,
         );
       } catch (err) {
@@ -367,10 +394,11 @@ async function runAgentic(
       // lookups. We surface a one-time fix hint at the end instead.
       if (!sawUnbuiltIndex && mentionsUnbuiltIndex(result)) sawUnbuiltIndex = true;
       // Trim before appending: results get re-sent every subsequent round, so a
-      // large one inflates input tokens on every request. Cap what the model
-      // needs to reason (it can call foundry_semanticSearch with expand for more).
+      // large one inflates input tokens on every request. Give code-bearing tools
+      // (search full bodies, read_file) a larger budget — that's the actual code
+      // the model must reason over — and keep signature/graph tools lean.
       resultParts.push(
-        new vscode.LanguageModelToolResultPart(call.callId, trimmedToolContent(result)),
+        new vscode.LanguageModelToolResultPart(call.callId, trimmedToolContent(result, budgetFor(call.name))),
       );
     }
     messages.push(vscode.LanguageModelChatMessage.User(resultParts));
@@ -501,6 +529,32 @@ async function runFallbackRag(
   }
   await countOutput(model, text, usage);
   renderUsage(stream, usage);
+}
+
+// Workspace custom-instruction files, in priority order. Built-in Copilot reads
+// these automatically for its own chat; a third-party participant must load them
+// itself. Capped so a long instructions file can't dominate the prompt.
+const CONVENTION_FILES = ['.github/copilot-instructions.md', 'AGENTS.md', '.github/AGENTS.md'];
+const MAX_CONVENTION_CHARS = 4000;
+
+async function loadProjectConventions(): Promise<string | null> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return null;
+  const parts: string[] = [];
+  for (const name of CONVENTION_FILES) {
+    try {
+      const uri = vscode.Uri.joinPath(folder.uri, name);
+      const raw = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8').trim();
+      if (raw) parts.push(`# ${name}\n${raw}`);
+    } catch {
+      /* not present — skip */
+    }
+  }
+  if (parts.length === 0) return null;
+  const joined = parts.join('\n\n');
+  return joined.length > MAX_CONVENTION_CHARS
+    ? `${joined.slice(0, MAX_CONVENTION_CHARS)}\n…(truncated)`
+    : joined;
 }
 
 function buildMessages(
@@ -855,6 +909,10 @@ function baseName(path: string): string {
 // re-sent to the model on every subsequent round, so this bounds input-token
 // growth; the model can pull more via foundry_semanticSearch expand if needed.
 const MAX_TOOL_RESULT_CHARS = 4000;
+// Larger budget for tools that return actual source (semantic_search full bodies,
+// read_file) — that code is what the model reasons over, so gutting it defeats the
+// purpose. Still bounded, since results re-send each round.
+const MAX_CODE_RESULT_CHARS = 8000;
 
 // Stable key for a tool call so repeats with the same input are detected
 // regardless of key order.
@@ -878,13 +936,35 @@ function callKey(name: string, input: unknown): string {
 // pass through untouched when there's no text to trim.
 function trimmedToolContent(
   result: vscode.LanguageModelToolResult,
+  budget = MAX_TOOL_RESULT_CHARS,
 ): Array<vscode.LanguageModelTextPart> | vscode.LanguageModelToolResult['content'] {
   let text = '';
   for (const part of result.content) {
     if (part instanceof vscode.LanguageModelTextPart) text += part.value;
   }
   if (!text) return result.content;
-  return [new vscode.LanguageModelTextPart(head(text, MAX_TOOL_RESULT_CHARS))];
+  return [new vscode.LanguageModelTextPart(head(text, budget))];
+}
+
+// Code-bearing tools carry the actual source the model reasons over, so they get
+// a larger slice; signature/graph/overview tools stay lean (they re-send each round).
+function budgetFor(toolName: string): number {
+  return toolName === `${FOUNDRY_TOOL_PREFIX}semanticSearch` ||
+    toolName === `${FOUNDRY_TOOL_PREFIX}readFile`
+    ? MAX_CODE_RESULT_CHARS
+    : MAX_TOOL_RESULT_CHARS;
+}
+
+// Weak models often call foundry_semanticSearch and then reason over the compact
+// signatures it returns by default, producing shallow answers. When the model
+// hasn't asked for bodies (no expand, no explicit detail), request full bodies for
+// a bounded number of hits so it always has real code to work from.
+function boostSearchInput(name: string, input: object): object {
+  if (name !== `${FOUNDRY_TOOL_PREFIX}semanticSearch`) return input;
+  const obj = input as Record<string, unknown>;
+  if ('expand' in obj || obj.detail) return input; // model already wants specific bodies
+  const topK = Math.min(Number(obj.topK) || 5, 5);
+  return { ...obj, detail: 'full', topK };
 }
 
 // First ~n characters (whole lines) of text, with a truncation marker.

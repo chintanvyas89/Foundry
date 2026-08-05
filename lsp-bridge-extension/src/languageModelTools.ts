@@ -68,6 +68,11 @@ const TOOLS: ToolDef[] = [
     mcpName: 'repo_overview',
     label: () => 'Reading the index overview',
   },
+  {
+    lmName: 'foundry_readFile',
+    mcpName: 'read_file',
+    label: (i) => `Reading ${s(i.file) || 'file'}`,
+  },
 ];
 
 /** LM tool names we own — used by the participant to filter the tool list. */
