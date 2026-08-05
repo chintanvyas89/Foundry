@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc -p .",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "build-config": "node scripts/build-config.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
