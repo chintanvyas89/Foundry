@@ -137,12 +137,16 @@ locked-down setups), use **`#foundryCodebase`** to pull code context from the
 local, offline Foundry index instead — it's the drop-in replacement, backed by the
 same `semantic_search` above. The deeper `foundry_*` Language Model tools
 (`foundry_traceCalls`, `foundry_findUsages`, `foundry_architectureOverview`,
-`foundry_readFile`, …) expose the rest of the toolset for agent mode. Route by what
-you're given: a known **symbol name** → `foundry_searchSymbol`; a named **module /
-directory / file** → `foundry_architectureOverview(module=…)` to locate it, then
-`foundry_readFile` to read its actual source; described **behaviour** with no name →
-`foundry_semanticSearch`. Then drill into the concrete hits (read the file, or
-`semantic_search` `expand=[…]`) rather than re-searching with reworded queries. There's also a `@codebase` chat
+`foundry_readFile`, `foundry_listDirectory`, `foundry_projectStandards`, …) expose the
+rest of the toolset for agent mode. Route by what you're given: a known **symbol name**
+→ `foundry_searchSymbol`; a named **module / directory / file** →
+`foundry_architectureOverview(module=…)` to locate it, then `foundry_readFile` to read
+its actual source; described **behaviour** with no name → `foundry_semanticSearch`. Then
+drill into the concrete hits (read the file, or `semantic_search` `expand=[…]`) rather
+than re-searching with reworded queries. On a **PHP/Drupal** repo, `foundry_readFile`
+accepts a **fully-qualified class name** (`Drupal\market\Entity\Foo`) and resolves it to
+the file; `foundry_projectStandards` reports the framework + PSR-4 namespace→directory
+map + coding standard. There's also a `@codebase` chat
 participant that answers workspace questions by driving these tools itself. For a
 visual overview, `@codebase /arch` renders a Mermaid module dependency graph and
 `@codebase /graph <symbol>` renders a Mermaid call graph (both offline, no model

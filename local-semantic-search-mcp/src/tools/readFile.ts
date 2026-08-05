@@ -4,6 +4,9 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { normalizeFileArg } from './pathArg.js';
 import { outlineWithTreeSitter, supportsTreeSitter, type OutlineSymbol } from '../chunking/treeSitterChunker.js';
+import { detectStandards } from '../standards/registry.js';
+import { resolveFqcn, looksLikeFqcn } from '../standards/resolve.js';
+import { resolveSymbolViaBridge } from '../chunking/lspBridgeClient.js';
 
 // Reads an actual file from the workspace (index-free) so an agent can read the
 // EXACT module/file it located — the drill step after semantic_search/searchSymbol
@@ -32,7 +35,11 @@ export function registerReadFileTool(server: McpServer, workspaceRoot: string): 
     {
       file: z
         .string()
-        .describe('File to read — absolute or workspace-relative (e.g. "src/storage/store.ts").'),
+        .describe(
+          'File to read — absolute or workspace-relative (e.g. "src/storage/store.ts"), ' +
+            'OR a fully-qualified class name (e.g. "Drupal\\market\\Entity\\Foo"), which is ' +
+            'resolved to its file via the language server / the project PSR-4 map.',
+        ),
       symbol: z
         .string()
         .optional()
@@ -55,7 +62,18 @@ export function registerReadFileTool(server: McpServer, workspaceRoot: string): 
         .describe('1-based last line to read (inclusive).'),
     },
     async ({ file, symbol, outline, startLine, endLine }) => {
-      const { abs, rel } = normalizeFileArg(file, workspaceRoot);
+      // A fully-qualified class name is resolved to its file (LSP first, then the
+      // PSR-4 map); a normal path is used as-is.
+      const target = await resolveReadTarget(file, workspaceRoot);
+      if (!target) {
+        return err(
+          `Could not resolve "${file}" — not a readable path, and no class matched via the ` +
+            'language server or the project PSR-4 map. Try project_standards for the namespace map.',
+          'unresolved',
+          file,
+        );
+      }
+      const { abs, rel } = target;
 
       // Keep reads inside the workspace — refuse path traversal / absolute paths
       // that resolve outside the indexed root.
@@ -122,6 +140,37 @@ export function registerReadFileTool(server: McpServer, workspaceRoot: string): 
       return sliceResult(rel, lines, total, 1, to);
     },
   );
+}
+
+// Turn the `file` arg into a concrete { abs, rel }. A normal path is used directly;
+// a fully-qualified class name is resolved LSP-first (the language server's own
+// PSR-4/namespace knowledge), then via the offline PSR-4 map. Null if unresolvable.
+async function resolveReadTarget(
+  file: string,
+  workspaceRoot: string,
+): Promise<{ abs: string; rel: string } | null> {
+  if (!looksLikeFqcn(file)) return normalizeFileArg(file, workspaceRoot);
+
+  const viaLsp = await resolveFqcnViaLsp(file, workspaceRoot);
+  if (viaLsp) return normalizeFileArg(viaLsp, workspaceRoot);
+
+  const off = resolveFqcn(file, detectStandards(workspaceRoot), workspaceRoot);
+  return off ? { abs: off.abs, rel: off.rel } : null;
+}
+
+// Ask the language server (via the bridge) for the class by short name, then pick the
+// hit whose enclosing namespace matches the FQCN. Returns an absolute path or null.
+async function resolveFqcnViaLsp(fqcn: string, workspaceRoot: string): Promise<string | null> {
+  const clean = fqcn.replace(/^\\+/, '');
+  const shortName = clean.split('\\').pop() ?? clean;
+  const ns = clean.slice(0, clean.length - shortName.length).replace(/\\+$/, '');
+
+  const hits = await resolveSymbolViaBridge(workspaceRoot, shortName);
+  if (!hits || hits.length === 0) return null;
+  const named = hits.filter((h) => h.name === shortName);
+  if (named.length === 0) return null;
+  const exact = named.find((h) => h.container.replace(/^\\+/, '') === ns);
+  return (exact ?? named[0]).file;
 }
 
 function err(text: string, code: string, file: string) {

@@ -141,10 +141,10 @@ Then in VS Code:
 
 The extension adds two things — a no-LLM search UI and the top chunking tier —
 and neither requires Copilot. A prebuilt `.vsix` is committed at
-[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.13.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.13.vsix):
+[`lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix`](lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix):
 
 ```bash
-code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.13.vsix
+code --install-extension lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix
 ```
 
 Or, from VS Code: **Extensions view → “…” menu → Install from VSIX…** and pick that
@@ -169,7 +169,7 @@ absolute node path if VS Code can't find `node`). Then:
   step, click to open, cycle-guarded) — and **Uses** (references across the
   workspace), both powered by the language server.
 
-For Copilot, the server exposes ten MCP tools: **`semantic_search`** (by
+For Copilot, the server exposes eleven MCP tools: **`semantic_search`** (by
 meaning), **`search_symbol`** (exact/partial name — callables *and* non-callable
 declarations like interfaces/enums/types once the symbol table is built),
 **`trace_calls`** (call graph, one level), **`show_execution_flow`** (multi-level
@@ -184,9 +184,14 @@ identifies a named module/file). It's **two-pass to stay token-lean**: call it w
 just the file to get an *outline* (the file's functions/classes/methods with line
 ranges, no bodies), then again with `symbol="name"` to read just that symbol's code
 (or a `startLine`/`endLine` range); small files return whole. Absolute or relative
-path), and **`list_directory`** (the workspace's recursive file/folder tree,
-respecting `.gitignore`/`.sweignore` — orient on the layout or find where files
-live, covering unindexed files too; depth-limited, drill in with `path="<subdir>"`).
+path — **or a fully-qualified class name** like `Drupal\market\Entity\Foo`, resolved
+to its file via the language server / the project's PSR-4 map), **`list_directory`**
+(the workspace's recursive file/folder tree, respecting `.gitignore`/`.sweignore` —
+orient on the layout or find where files live, covering unindexed files too;
+depth-limited, drill in with `path="<subdir>"`), and **`project_standards`** (detected
+framework — Drupal/Symfony/Laravel — the PSR-4 namespace→directory map, and the
+enforced coding standard, read from the project's own files; see *Project standards*
+below).
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
 language-server-backed tools need the extension running and can't resolve dynamic
@@ -393,6 +398,45 @@ server extension in VS Code — see below.)
 
 ---
 
+## Project standards (PHP/PSR-4, frameworks) — pluggable
+
+Foundry auto-detects a project's **standards** and uses them for local intelligence,
+by **reading the ecosystem's own artifacts rather than reinventing the rules**:
+
+- **PSR-4 namespace → directory map + framework** from Composer's generated
+  `vendor/composer/installed.json` and `autoload_classmap.php` (authoritative, after
+  `composer install`), the root `composer.json`, and Drupal `*.info.yml` markers
+  (module namespaces Drupal registers at runtime, which aren't in Composer's PSR-4).
+- **Coding standard** from the project's own linter config (`phpcs.xml`,
+  `.php-cs-fixer`, `.editorconfig`).
+
+Two ways it's used, both **offline and re-embed-free**:
+- **`project_standards`** tool / `@codebase` — reports the framework, PSR-4 map, and
+  coding standard (also summarized in `repo_overview`).
+- **FQCN resolution** — `read_file` (and `@codebase`) accept a **fully-qualified class
+  name** (`Drupal\market\Entity\Foo`) and resolve it to its file — via the **language
+  server** when the LSP bridge is running (it already implements PSR-4), otherwise the
+  PSR-4 map above.
+
+**It's pluggable.** Detection is a registry of small "readers" under
+[`local-semantic-search-mcp/src/standards/readers/`](local-semantic-search-mcp/src/standards/readers/)
+— add a standard/ecosystem by dropping in a reader file and one line in `index.ts`. And
+**any project can declare its own** standards with no code via a
+`<workspace>/.foundry/standards.json`:
+
+```json
+{
+  "frameworks": ["MyFramework"],
+  "psr4": { "App\\": "app/src" },
+  "codingStandards": ["PSR-12"]
+}
+```
+
+Non-PHP ecosystems (e.g. TypeScript `tsconfig` `paths`) aren't built in yet, but the
+same reader interface and `.foundry/standards.json` already cover them.
+
+---
+
 ## Verifying it works
 
 - **Quickest (no VS Code):** from `local-semantic-search-mcp/`, run
@@ -439,7 +483,7 @@ once:
    and `node_modules/` are gitignored, so this step is always local.)
 2. **Install the extension** (needed to *build/refresh* indexes or use the search
    panel; not needed to just query a shared index): `code --install-extension
-   lsp-bridge-extension/swe-search-lsp-bridge-0.9.13.vsix`. The `.vsix` **is**
+   lsp-bridge-extension/swe-search-lsp-bridge-0.9.14.vsix`. The `.vsix` **is**
    committed, so it's already in the clone.
 3. **Config is committed.** `.vscode/mcp.json` uses `${workspaceFolder}`, so it
    works as-is — no per-machine edits.

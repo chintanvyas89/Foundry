@@ -5,6 +5,7 @@ import { getPipePath } from './pipeName';
 import { getSymbolsForFile, getAllSymbolsForFile } from './symbolProvider';
 import { getCallHierarchy } from './callHierarchy';
 import { getReferences, getImplementations } from './references';
+import { resolveWorkspaceSymbol } from './workspaceSymbol';
 import { SearchClient } from './searchClient';
 import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
@@ -94,7 +95,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 async function handleRequest(socket: net.Socket, line: string) {
-  let msg: { id: string; type: string; file: string; line?: number; symbol?: string };
+  let msg: { id: string; type: string; file: string; line?: number; symbol?: string; query?: string };
   try {
     msg = JSON.parse(line);
   } catch {
@@ -110,6 +111,9 @@ async function handleRequest(socket: net.Socket, line: string) {
     } else if (msg.type === 'implementations') {
       const refs = await getImplementations(msg.file, msg.line ?? 1, msg.symbol);
       socket.write(JSON.stringify({ id: msg.id, refs }) + '\n');
+    } else if (msg.type === 'workspaceSymbol') {
+      const workspaceSymbols = await resolveWorkspaceSymbol(msg.query ?? '');
+      socket.write(JSON.stringify({ id: msg.id, workspaceSymbols }) + '\n');
     } else if (msg.type === 'allSymbols') {
       // All indexable declaration kinds for the standalone symbols table —
       // separate from the chunking symbol stream below, so it can't change

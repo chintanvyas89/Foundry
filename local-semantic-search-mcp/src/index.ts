@@ -24,6 +24,7 @@ import { registerRepoOverviewTool } from './tools/repoOverview.js';
 import { registerArchitectureOverviewTool } from './tools/architectureOverview.js';
 import { registerReadFileTool } from './tools/readFile.js';
 import { registerListDirectoryTool } from './tools/listDirectory.js';
+import { registerProjectStandardsTool } from './tools/projectStandards.js';
 
 async function main() {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
@@ -327,7 +328,7 @@ async function main() {
   // find_usages / find_implementations — also bridge-backed, no gate needed.
   registerSymbolRefTools(server, store, workspaceRoot);
   // Workspace orientation summary — reads stored counts only, no gate.
-  registerRepoOverviewTool(server, store);
+  registerRepoOverviewTool(server, store, workspaceRoot);
   // Deterministic module-level architecture map — aggregates the persisted
   // symbols/usages/graph indexes; no gate, no re-index.
   registerArchitectureOverviewTool(server, store);
@@ -335,6 +336,8 @@ async function main() {
   registerReadFileTool(server, workspaceRoot);
 
   registerListDirectoryTool(server, workspaceRoot, config.exclude);
+
+  registerProjectStandardsTool(server, workspaceRoot);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

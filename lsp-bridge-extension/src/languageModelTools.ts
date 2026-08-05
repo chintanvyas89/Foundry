@@ -81,6 +81,11 @@ const TOOLS: ToolDef[] = [
     mcpName: 'list_directory',
     label: (i) => `Listing ${s(i.path) || 'the workspace'}`,
   },
+  {
+    lmName: 'foundry_projectStandards',
+    mcpName: 'project_standards',
+    label: () => 'Detecting project standards',
+  },
 ];
 
 /** LM tool names we own — used by the participant to filter the tool list. */

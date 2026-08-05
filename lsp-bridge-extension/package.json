@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.13",
+  "version": "0.9.14",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -342,6 +342,25 @@
             "maxEntries": {
               "type": "number",
               "description": "Cap on total entries returned (default 400)."
+            }
+          }
+        }
+      },
+      {
+        "name": "foundry_projectStandards",
+        "displayName": "Foundry: project standards",
+        "modelDescription": "Report the project's detected standards: framework(s) (Drupal/Symfony/Laravel), the PSR-4 namespace→directory map, and the enforced coding standard — read from the ecosystem's own files (Composer's generated vendor artifacts, composer.json, Drupal *.info.yml, .foundry/standards.json), not guessed. Use on a PHP/Drupal repo to learn how namespaces map to folders (foundry_readFile also accepts a fully-qualified class name and resolves it). Deterministic, offline, no index.",
+        "icon": "$(law)",
+        "tags": [
+          "foundry",
+          "codebase"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "namespaces": {
+              "type": "boolean",
+              "description": "Include the full PSR-4 map (default true)."
             }
           }
         }

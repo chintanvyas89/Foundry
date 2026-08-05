@@ -28,11 +28,22 @@ export interface BridgeRef {
   text: string;
 }
 
+// A workspace-symbol hit from the language server (executeWorkspaceSymbolProvider).
+// `container` is the enclosing namespace/class, which lets us disambiguate a FQCN.
+export interface BridgeWsSymbol {
+  name: string;
+  kind: string;
+  container: string;
+  file: string;
+  line: number;
+}
+
 interface BridgeResponse {
   id: string;
   symbols?: BridgeSymbol[];
   calls?: BridgeCallHierarchy;
   refs?: BridgeRef[];
+  workspaceSymbols?: BridgeWsSymbol[];
   error?: string;
 }
 
@@ -195,4 +206,16 @@ export async function getImplementationsViaBridge(
 ): Promise<BridgeRef[] | null> {
   const msg = await sendRequest(workspaceRoot, { type: 'implementations', file, line, symbol });
   return msg ? (msg.refs ?? []) : null;
+}
+
+// Workspace symbol lookup via the language server (executeWorkspaceSymbolProvider) —
+// resolves a class/symbol NAME to its location using the server's own knowledge of
+// PSR-4/namespace autoloading. Returns null when the bridge isn't reachable, an empty
+// array when the server has no match.
+export async function resolveSymbolViaBridge(
+  workspaceRoot: string,
+  query: string,
+): Promise<BridgeWsSymbol[] | null> {
+  const msg = await sendRequest(workspaceRoot, { type: 'workspaceSymbol', query });
+  return msg ? (msg.workspaceSymbols ?? []) : null;
 }
