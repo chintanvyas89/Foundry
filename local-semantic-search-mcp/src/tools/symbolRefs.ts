@@ -1,4 +1,4 @@
-import { join, relative, sep } from 'node:path';
+import { join } from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { VectorStore } from '../storage/store.js';
@@ -7,6 +7,7 @@ import {
   getImplementationsViaBridge,
   type BridgeRef,
 } from '../chunking/lspBridgeClient.js';
+import { normalizeFileArg } from './pathArg.js';
 
 // find_usages / find_implementations. find_usages prefers the live language
 // server (via the LSP bridge) but falls back to the persisted usages index
@@ -16,7 +17,7 @@ import {
 const params = {
   file: z
     .string()
-    .describe('Absolute file path of the symbol (the "file" field from a search result).'),
+    .describe('File path of the symbol (the "file" field from a search result) — absolute or workspace-relative.'),
   line: z
     .number()
     .int()
@@ -40,7 +41,6 @@ export function registerSymbolRefTools(
   store: VectorStore,
   workspaceRoot: string,
 ): void {
-  const toRel = (abs: string) => relative(workspaceRoot, abs).split(sep).join('/');
   const toAbs = (rel: string) => join(workspaceRoot, rel);
 
   server.tool(
@@ -54,13 +54,14 @@ export function registerSymbolRefTools(
       "lookup can find it). Can't resolve dynamic dispatch or cross-language.",
     params,
     async ({ file, line, symbol }) => {
-      const refs = await getReferencesViaBridge(workspaceRoot, file, line, symbol);
+      const { abs, rel } = normalizeFileArg(file, workspaceRoot);
+      const refs = await getReferencesViaBridge(workspaceRoot, abs, line, symbol);
 
       // Live path: the language server answered.
       if (refs) {
         if (refs.length === 0) {
           return {
-            content: [{ type: 'text', text: `No usages found for ${file}:${line}.` }],
+            content: [{ type: 'text', text: `No usages found for ${abs}:${line}.` }],
             structuredContent: { results: [], source: 'live' },
           };
         }
@@ -72,7 +73,7 @@ export function registerSymbolRefTools(
 
       // Fallback: the persisted usages index. Keyed by name, like the call graph.
       if (symbol) {
-        const usages = store.getUsages(toRel(file), symbol);
+        const usages = store.getUsages(rel, symbol);
         if (usages.length > 0) {
           const nodes: BridgeRef[] = usages.map((u) => ({
             file: toAbs(u.file),
@@ -106,13 +107,14 @@ export function registerSymbolRefTools(
       'pass the symbol name so the offline lookup can find it).',
     params,
     async ({ file, line, symbol }) => {
-      const impls = await getImplementationsViaBridge(workspaceRoot, file, line, symbol);
+      const { abs, rel } = normalizeFileArg(file, workspaceRoot);
+      const impls = await getImplementationsViaBridge(workspaceRoot, abs, line, symbol);
 
       // Live path: the language server answered.
       if (impls) {
         if (impls.length === 0) {
           return {
-            content: [{ type: 'text', text: `No implementations found for ${file}:${line}.` }],
+            content: [{ type: 'text', text: `No implementations found for ${abs}:${line}.` }],
             structuredContent: { results: [], source: 'live' },
           };
         }
@@ -124,7 +126,7 @@ export function registerSymbolRefTools(
 
       // Fallback: the persisted implementations index (keyed by name).
       if (symbol) {
-        const stored = store.getImplementations(toRel(file), symbol);
+        const stored = store.getImplementations(rel, symbol);
         if (stored.length > 0) {
           const nodes: BridgeRef[] = stored.map((s) => ({ file: toAbs(s.file), line: s.line, text: s.text }));
           return {

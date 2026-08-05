@@ -51,6 +51,11 @@ const ct = textOf(callers);
 assert(ct.includes('called by'), 'callers direction header');
 assert(ct.includes('c ('), 'callers walk finds c (c -> d)');
 
+// A workspace-RELATIVE file arg must resolve the same as the absolute one
+// (index paths are relative; a bare relative path used to be mangled to nothing).
+const relFlow = await run({ file: 'a.ts', symbol: 'a', depth: 3 });
+assert(textOf(relFlow) === t, 'relative file arg gives the same result as absolute');
+
 store.close();
 rmSync(dbPath, { force: true });
 rmSync(`${dbPath}-wal`, { force: true });

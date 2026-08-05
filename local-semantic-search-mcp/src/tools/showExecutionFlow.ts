@@ -1,7 +1,8 @@
-import { join, relative, sep } from 'node:path';
+import { join } from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { VectorStore } from '../storage/store.js';
+import { normalizeFileArg } from './pathArg.js';
 
 // Multi-level execution-flow walk over the PERSISTED call graph (`call_edges`).
 // trace_calls is one level; this follows the chain to a bounded depth in one
@@ -26,7 +27,6 @@ export function registerExecutionFlowTool(
   store: VectorStore,
   workspaceRoot: string,
 ): void {
-  const toRel = (abs: string) => relative(workspaceRoot, abs).split(sep).join('/');
   const toAbs = (rel: string) => join(workspaceRoot, rel);
 
   server.tool(
@@ -42,7 +42,7 @@ export function registerExecutionFlowTool(
     {
       file: z
         .string()
-        .describe('Absolute file path of the starting function (a semantic_search result\'s "file").'),
+        .describe('File path of the starting function (a search result\'s "file") — absolute or workspace-relative.'),
       symbol: z.string().describe('The starting function/method name (required — the graph is keyed by name).'),
       line: z
         .number()
@@ -64,7 +64,7 @@ export function registerExecutionFlowTool(
     async ({ file, symbol, line, direction, depth }) => {
       const dir = direction ?? 'callees';
       const maxDepth = Math.min(depth ?? 3, MAX_DEPTH);
-      const relFile = toRel(file);
+      const { abs, rel: relFile } = normalizeFileArg(file, workspaceRoot);
       const step = (f: string, n: string) =>
         dir === 'callers' ? store.getCallers(f, n) : store.getCallees(f, n);
 
@@ -112,7 +112,7 @@ export function registerExecutionFlowTool(
       }
 
       const arrow = dir === 'callers' ? 'called by' : 'calls';
-      const lines: string[] = [`${symbol} (${file}) — ${arrow}, depth ${maxDepth}:`];
+      const lines: string[] = [`${symbol} (${abs}) — ${arrow}, depth ${maxDepth}:`];
       const render = (n: FlowNode, level: number) => {
         if (level > 0) {
           // These markers describe the node itself not being expanded further.

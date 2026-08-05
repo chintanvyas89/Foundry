@@ -64,6 +64,10 @@ assert(res.structuredContent.results.length === 2, 'returns both implementations
 const none = await handler({ file: `${WS}/src/types.ts`, line: 1, symbol: 'Nonexistent' });
 assert(/unavailable/i.test(textOf(none)), 'unknown symbol with no bridge reports unavailable');
 
+// A workspace-RELATIVE file arg resolves the same as the absolute one.
+const rel = await handler({ file: 'src/types.ts', line: 5, symbol: 'Store' });
+assert(textOf(rel) === t, 'relative file arg gives the same implementations as absolute');
+
 store.close();
 rmSync(dbPath, { force: true });
 rmSync(`${dbPath}-wal`, { force: true });

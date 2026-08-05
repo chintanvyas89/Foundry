@@ -1,8 +1,9 @@
-import { join, relative, sep } from 'node:path';
+import { join } from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCallHierarchyViaBridge, type BridgeCallNode } from '../chunking/lspBridgeClient.js';
 import type { VectorStore, CallGraphNode } from '../storage/store.js';
+import { normalizeFileArg } from './pathArg.js';
 
 // Call-graph / execution-flow tool. Prefers the live language server (via the
 // LSP bridge) but falls back to the persisted call graph (`call_edges`) when the
@@ -13,7 +14,6 @@ export function registerTraceCallsTool(
   store: VectorStore,
   workspaceRoot: string,
 ): void {
-  const toRel = (abs: string) => relative(workspaceRoot, abs).split(sep).join('/');
   const toAbs = (rel: string) => join(workspaceRoot, rel);
 
   server.tool(
@@ -30,7 +30,7 @@ export function registerTraceCallsTool(
     {
       file: z
         .string()
-        .describe('Absolute file path of the function (the "file" field from a semantic_search result).'),
+        .describe('File path of the function (the "file" field from a search result) — absolute or workspace-relative.'),
       line: z
         .number()
         .int()
@@ -45,7 +45,8 @@ export function registerTraceCallsTool(
         ),
     },
     async ({ file, line, symbol }) => {
-      const calls = await getCallHierarchyViaBridge(workspaceRoot, file, line, symbol);
+      const { abs, rel } = normalizeFileArg(file, workspaceRoot);
+      const calls = await getCallHierarchyViaBridge(workspaceRoot, abs, line, symbol);
 
       // Live path: language server answered with a real root.
       if (calls && calls.root) {
@@ -70,23 +71,22 @@ export function registerTraceCallsTool(
       // by name, not the caller-supplied line which may differ from the stored
       // definition line).
       if (symbol) {
-        const relFile = toRel(file);
-        const callees = store.getCallees(relFile, symbol);
-        const callers = store.getCallers(relFile, symbol);
+        const callees = store.getCallees(rel, symbol);
+        const callers = store.getCallers(rel, symbol);
         if (callees.length > 0 || callers.length > 0) {
           const fmt = (nodes: CallGraphNode[]) =>
             nodes.length
               ? nodes.map((n) => `  - ${n.name} (${toAbs(n.file)}:${n.line})`).join('\n')
               : '  (none)';
           const text =
-            `Call hierarchy for ${symbol} (${file}:${line}) — from the saved call graph ` +
+            `Call hierarchy for ${symbol} (${abs}:${line}) — from the saved call graph ` +
             `(LSP bridge not running)\n\n` +
             `Calls (outgoing):\n${fmt(callees)}\n\n` +
             `Called by (incoming):\n${fmt(callers)}`;
           return {
             content: [{ type: 'text', text }],
             structuredContent: {
-              root: { name: symbol, file, line },
+              root: { name: symbol, file: abs, line },
               outgoing: callees.map((n) => ({ name: n.name, file: toAbs(n.file), line: n.line })),
               incoming: callers.map((n) => ({ name: n.name, file: toAbs(n.file), line: n.line })),
               source: 'persisted',
