@@ -239,7 +239,7 @@ function renderRepo(map: ArchMap): string {
   return lines.join('\n');
 }
 
-function renderModule(store: VectorStore, map: ArchMap, m: ModuleInfo): string {
+function renderModule(store: VectorStore, map: ArchMap, m: ModuleInfo, label = 'module'): string {
   const files = new Set(m.files);
   const refsByKey = new Map<string, number>();
   for (const h of store.symbolHotspots(5000)) refsByKey.set(`${h.file}|${h.name}`, h.refs);
@@ -260,7 +260,7 @@ function renderModule(store: VectorStore, map: ArchMap, m: ModuleInfo): string {
   const role = roleHint(m.module);
 
   const lines: string[] = [];
-  lines.push(`## ${m.module} — module${role ? ` · ${role}` : ''}`);
+  lines.push(`## ${m.module} — ${label}${role ? ` · ${role}` : ''}`);
   lines.push('', `Files (${m.files.length}): ${cap(m.files.map(baseName), 12, (x) => x)}`);
   if (map.hasSymbols) {
     lines.push(
@@ -278,22 +278,58 @@ function renderModule(store: VectorStore, map: ArchMap, m: ModuleInfo): string {
   return lines.join('\n');
 }
 
-// Resolve a user-supplied module argument (a directory path, a partial path, or
-// just a directory name) to one of the known modules. Returns the match, or a
-// list of candidates when it's ambiguous / unknown.
-function resolveModule(
-  map: ArchMap,
-  raw: string,
-): { match?: ModuleInfo; candidates: string[] } {
+type ResolveResult = {
+  match?: ModuleInfo; // a single leaf module
+  subtree?: ModuleInfo[]; // a directory with sub-modules (recursive drilldown)
+  subtreeRoot?: string;
+  candidates: string[];
+};
+
+// Resolve a user-supplied module argument to known module(s). Handles:
+//   - a directory path (relative OR fully-qualified/absolute — index paths are
+//     workspace-relative, so we peel leading segments until a relative suffix
+//     matches the index);
+//   - a file path (its directory is used);
+//   - a parent directory that only contains sub-directories → its whole SUBTREE
+//     (recursive drilldown), not "not found";
+//   - a bare directory name (partial match).
+// Returns a single match, a subtree, or candidates when ambiguous/unknown.
+function resolveModule(map: ArchMap, raw: string): ResolveResult {
   const q = raw.replace(/\\/g, '/').replace(/\/+$/, '').trim();
-  const byKey = map.modules.find((m) => m.module === q);
-  if (byKey) return { match: byKey, candidates: [] };
+  if (!q) return { candidates: [] };
 
-  // If they passed a file path, try its directory.
-  const asDir = dirOf(q);
-  const byDir = map.modules.find((m) => m.module === asDir);
-  if (byDir) return { match: byDir, candidates: [] };
+  // Peel leading path segments so an absolute/fully-qualified path
+  // (/home/dev/proj/modules/custom/market) reduces to the relative key the index
+  // stores (modules/custom/market). The full path is tried first (i=0), so the
+  // longest — most specific — matching suffix wins.
+  const segs = q.split('/').filter(Boolean);
+  for (let i = 0; i < Math.max(segs.length, 1); i++) {
+    const rel = segs.slice(i).join('/');
+    if (!rel) break;
+    const direct = resolveRelative(map, rel);
+    if (direct.match || direct.subtree) return direct;
+    // A file path: fall back to its directory.
+    const asDir = dirOf(rel);
+    if (asDir !== rel && asDir !== '(root)') {
+      const viaDir = resolveRelative(map, asDir);
+      if (viaDir.match || viaDir.subtree) return viaDir;
+    }
+  }
 
+  return resolveByName(map, q);
+}
+
+// Match a workspace-relative directory against the module keys: an exact leaf, a
+// single descendant, or a parent whose subtree spans several modules.
+function resolveRelative(map: ArchMap, rel: string): ResolveResult {
+  const under = map.modules.filter((m) => m.module === rel || m.module.startsWith(`${rel}/`));
+  if (under.length === 0) return { candidates: [] };
+  if (under.length === 1) return { match: under[0], candidates: [] };
+  return { subtree: under, subtreeRoot: rel, candidates: [] };
+}
+
+// Last-resort name match (a bare directory name like "storage").
+function resolveByName(map: ArchMap, q: string): ResolveResult {
   const ql = q.toLowerCase();
   const partial = map.modules.filter(
     (m) => m.module.toLowerCase().endsWith(`/${ql}`) || shortName(m.module).toLowerCase() === ql,
@@ -304,6 +340,42 @@ function resolveModule(
   const contains = map.modules.filter((m) => m.module.toLowerCase().includes(ql));
   if (contains.length === 1) return { match: contains[0], candidates: [] };
   return { candidates: contains.map((m) => m.module) };
+}
+
+// Roll a subtree of modules up into one aggregate: union of files, and cross-module
+// edges that leave the subtree (intra-subtree edges are internal, so dropped).
+function aggregateSubtree(root: string, modules: ModuleInfo[]): ModuleInfo {
+  const inSubtree = new Set(modules.map((m) => m.module));
+  const agg: ModuleInfo = { module: root, files: [], dependsOn: new Map(), usedBy: new Set() };
+  for (const m of modules) {
+    agg.files.push(...m.files);
+    for (const [dep, c] of m.dependsOn) {
+      if (!inSubtree.has(dep)) agg.dependsOn.set(dep, (agg.dependsOn.get(dep) ?? 0) + c);
+    }
+    for (const u of m.usedBy) if (!inSubtree.has(u)) agg.usedBy.add(u);
+  }
+  agg.files.sort();
+  return agg;
+}
+
+// Recursive drilldown: an aggregated summary of the whole subtree, then the list
+// of child sub-modules to drill into further.
+function renderSubtree(store: VectorStore, map: ArchMap, root: string, modules: ModuleInfo[]): string {
+  const agg = aggregateSubtree(root, modules);
+  const summary = renderModule(store, map, agg, `subtree · ${modules.length} submodules`);
+
+  const children = [...modules].sort((a, b) => b.files.length - a.files.length);
+  const lines = [summary, '', `### Submodules (${modules.length})`];
+  for (const c of children.slice(0, 30)) {
+    const rel = c.module === root ? '(files directly here)' : c.module.slice(root.length + 1);
+    const extDeps = [...c.dependsOn.keys()].filter((d) => !d.startsWith(`${root}/`) && d !== root).length;
+    lines.push(
+      `- ${rel} (${c.files.length} file${c.files.length === 1 ? '' : 's'})` +
+        (extDeps ? ` · depends on ${extDeps} external module(s)` : ''),
+    );
+  }
+  if (modules.length > 30) lines.push(`  … and ${modules.length - 30} more submodules.`);
+  return lines.join('\n');
 }
 
 export function registerArchitectureOverviewTool(server: McpServer, store: VectorStore): void {
@@ -343,7 +415,27 @@ export function registerArchitectureOverviewTool(server: McpServer, store: Vecto
       }
 
       if (module && module.trim()) {
-        const { match, candidates } = resolveModule(map, module);
+        const { match, subtree, subtreeRoot, candidates } = resolveModule(map, module);
+
+        // Recursive drilldown: a parent directory spanning several sub-modules.
+        if (subtree && subtreeRoot) {
+          const agg = aggregateSubtree(subtreeRoot, subtree);
+          const text = renderSubtree(store, map, subtreeRoot, subtree);
+          return {
+            content: [{ type: 'text', text }],
+            structuredContent: {
+              scope: 'module',
+              matched: true,
+              subtree: true,
+              module: subtreeRoot,
+              files: agg.files,
+              submodules: subtree.map((m) => ({ module: m.module, files: m.files.length })),
+              dependsOn: [...agg.dependsOn.entries()].map(([mod, count]) => ({ module: mod, count })),
+              usedBy: [...agg.usedBy],
+            },
+          };
+        }
+
         if (!match) {
           const hint = candidates.length
             ? `Did you mean: ${candidates.slice(0, 10).join(', ')}?`

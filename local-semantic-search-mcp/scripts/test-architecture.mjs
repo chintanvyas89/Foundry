@@ -97,6 +97,38 @@ assert(/## src\/tools — module/.test(textOf(byPath)), 'a file path resolves to
 const miss = await handler({ module: 'nope' });
 assert(/No module matched/.test(textOf(miss)) && miss.structuredContent.matched === false, 'unknown module reports no match');
 
+// ---- absolute / fully-qualified path resolves to the relative index key -----
+// Search UIs surface absolute paths, but the index stores relative ones; the
+// drilldown must peel the workspace-root prefix.
+const abs = await handler({ module: '/home/dev/project/src/storage' });
+assert(/## src\/storage — module/.test(textOf(abs)), 'an absolute path resolves to the relative module key');
+const absFile = await handler({ module: '/home/dev/project/src/tools/searchSymbol.ts' });
+assert(/## src\/tools — module/.test(textOf(absFile)), 'an absolute FILE path resolves to its directory module');
+
+// ---- recursive drilldown into a parent that has only sub-directories --------
+// A Drupal-style nested module: files live only in subfolders, so the parent
+// dir has no direct files. Drilling into it must return the SUBTREE, not "not
+// found".
+for (const f of [
+  'modules/custom/market/src/Entity/Activity.php',
+  'modules/custom/market/src/Controller/MarketController.php',
+  'modules/custom/market/src/Form/SettingsForm.php',
+]) {
+  store.setFileHash(f, 'h');
+}
+const sub = await handler({ module: 'modules/custom/market' });
+const st = textOf(sub);
+console.log('\n--- architecture_overview (subtree=modules/custom/market) ---\n' + st + '\n');
+assert(/subtree · 3 submodules/.test(st), 'parent dir renders as a recursive subtree summary');
+assert(/### Submodules \(3\)/.test(st), 'subtree lists its child submodules');
+assert(/Entity \(1 file\)/.test(st) && /Controller \(1 file\)/.test(st), 'child submodules show relative names + file counts');
+assert(sub.structuredContent.subtree === true && sub.structuredContent.submodules.length === 3, 'structuredContent marks a subtree with its submodules');
+assert(sub.structuredContent.files.length === 3, 'subtree aggregates all files under the parent');
+
+// The same subtree via an absolute path.
+const subAbs = await handler({ module: '/var/www/html/modules/custom/market' });
+assert(/subtree · 3 submodules/.test(textOf(subAbs)), 'absolute path also resolves to the recursive subtree');
+
 store.close();
 rmSync(dbPath, { force: true });
 rmSync(`${dbPath}-wal`, { force: true });
