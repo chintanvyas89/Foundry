@@ -62,18 +62,16 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage('Nothing to implement — no plan text was captured.');
         return;
       }
-      // LEAN sectioned prompt: the tool policy / working rules now live in the
-      // "Foundry" custom agent (.github/agents/foundry.agent.md), so the query is
-      // just the user's intent + the authoritative plan, plus one line reminding
-      // the agent to follow the plan (survives even if the agent isn't selected).
+      // LEAN sectioned prompt. All behaviour (plan is authoritative, foundry-only
+      // exploration, etc.) now lives in the "Foundry" custom agent under its
+      // "execute-plan mode" section — the query only needs to declare the mode and
+      // carry the intent + plan. (mode: 'Foundry' selects the agent; the `Mode:`
+      // MARKER here is a content signal the agent keys on, since the chat command's
+      // own `mode` field is already used to pick the agent.)
       const sections = [
-        '# Implement the plan below',
-        'The plan below was produced by a codebase-aware analysis and is **authoritative** — ' +
-          'follow it. Execute the steps in order; do not re-derive the solution or run a ' +
-          'discovery loop to rediscover it. Explore only for a missing detail, only after ' +
-          'starting, and only with the Foundry (foundry_*) tools.',
+        'Mode: execute-plan',
         request ? `## Original request (the user's intent)\n\n${request}` : '',
-        `## Plan to implement (authoritative — follow these steps in order)\n\n${content}`,
+        `## Plan to implement\n\n${content}`,
       ];
       const query = sections.filter(Boolean).join('\n\n');
       // Prefer the "Foundry" custom agent (tool scope + full policy live in the agent

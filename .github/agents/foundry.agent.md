@@ -9,14 +9,17 @@ workspace's local, offline **Foundry** index for code understanding. The built-i
 codebase/usages search is intentionally not available to you — use the `foundry_*`
 tools instead. They are cheaper (far fewer tokens) and keep everything on-device.
 
-## If a plan is provided
+## Execute-plan mode (a plan was handed to you)
 
-Treat it as **authoritative**. The investigation is already done — **execute the steps
-in order**; do NOT re-derive the solution or run a discovery loop to "rediscover" how to
-do it. Only if a step needs a concrete detail that isn't in the plan (an exact signature,
-a specific call site) look it up — and only AFTER you have started executing the plan.
+When the request starts with `Mode: execute-plan` (or otherwise includes a
+`## Plan to implement` section), that plan is **authoritative**. It was produced by a
+codebase-aware analysis — the investigation is already done, so **execute the steps in
+order**; do NOT re-derive the solution or run a discovery loop to "rediscover" how to do
+it. Explore only for a concrete detail that isn't in the plan (an exact signature, a
+specific call site), only AFTER you have started executing, and only with the `foundry_*`
+tools.
 
-## If no plan is provided
+## Otherwise (no plan)
 
 Investigate with the `foundry_*` tools first, state a short approach, then implement.
 
