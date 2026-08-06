@@ -11,6 +11,8 @@ import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
 import { registerLanguageModelTools } from './languageModelTools';
 import { registerChatParticipant } from './chatParticipant';
+import { FOUNDRY_AGENT_MD, FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_REL_PATH } from './foundryAgent';
+import * as path from 'path';
 
 let server: net.Server | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
@@ -60,43 +62,73 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage('Nothing to implement — no plan text was captured.');
         return;
       }
-      // Front-load a firm TOOL POLICY so the built-in agent routes lookups through
-      // the local Foundry index instead of its own (token-heavy) file reads and
-      // codebase search. It's placed BEFORE the plan because the agent leans on
-      // whatever it sees first; a soft mention after the plan gets ignored. We
-      // can't hard-restrict the agent's tools from a third-party extension, so
-      // this in-context directive is the reliable lever. Then the user's original
-      // request (real intent), then the plan/answer to execute.
-      const query = [
-        'Implement the task below in this workspace.',
-        'TOOL POLICY — this workspace has a LOCAL Foundry code index; using it costs ' +
-          'far fewer tokens than reading/searching files directly. For ANY code lookup ' +
-          'during this task, use these FIRST — do NOT fall back to the built-in codebase ' +
-          'search or bulk file reads for exploration:\n' +
-          '• find code by meaning / "where is X handled" → #foundryCodebase (foundry_semanticSearch)\n' +
-          '• a known symbol name (function/class/type/const) → foundry_searchSymbol\n' +
-          "• a file's structure or one symbol's body → foundry_readFile (outline first with just `file`, then `symbol=`)\n" +
-          '• who calls it / where it is used / impact → foundry_findUsages, foundry_traceCalls, foundry_showExecutionFlow\n' +
-          '• config in .yml/.json (routes, fields, services, module deps) → foundry_searchConfig (never embedded; not in semantic search)\n' +
-          '• need to (re)plan a sub-part → foundry_plan\n' +
-          'Only open a file directly when you are about to EDIT it — reading a file you are ' +
-          'editing is fine; using direct reads/search to EXPLORE the codebase is not.',
-        request ? `Original request: ${request}` : '',
-        'Plan / answer to implement:',
-        content,
-      ]
-        .filter(Boolean)
-        .join('\n\n');
-      try {
-        // `mode: 'agent'` is honoured on recent VS Code; older builds ignore/reject it.
-        await vscode.commands.executeCommand('workbench.action.chat.open', { query, mode: 'agent' });
-      } catch {
+      // LEAN sectioned prompt: the tool policy / working rules now live in the
+      // "Foundry" custom agent (.github/agents/foundry.agent.md), so the query is
+      // just the user's intent + the authoritative plan, plus one line reminding
+      // the agent to follow the plan (survives even if the agent isn't selected).
+      const sections = [
+        '# Implement the plan below',
+        'The plan below was produced by a codebase-aware analysis and is **authoritative** — ' +
+          'follow it. Execute the steps in order; do not re-derive the solution or run a ' +
+          'discovery loop to rediscover it. Explore only for a missing detail, only after ' +
+          'starting, and only with the Foundry (foundry_*) tools.',
+        request ? `## Original request (the user's intent)\n\n${request}` : '',
+        `## Plan to implement (authoritative — follow these steps in order)\n\n${content}`,
+      ];
+      const query = sections.filter(Boolean).join('\n\n');
+      // Prefer the "Foundry" custom agent (tool scope + full policy live in the agent
+      // file). Fall back to plain agent mode, then a bare open, for older VS Code or
+      // when the agent file isn't installed. Some builds ignore an unknown mode rather
+      // than throwing, which is fine — the query still lands in a usable chat.
+      const attempts: Array<Record<string, unknown>> = [
+        { query, mode: FOUNDRY_AGENT_NAME },
+        { query, mode: 'agent' },
+        { query },
+      ];
+      let opened = false;
+      for (const args of attempts) {
         try {
-          await vscode.commands.executeCommand('workbench.action.chat.open', { query });
-          vscode.window.showInformationMessage('Switch the chat to Agent mode to execute this plan.');
-        } catch (err) {
-          vscode.window.showWarningMessage(`Couldn't open chat for implementation: ${String(err)}`);
+          await vscode.commands.executeCommand('workbench.action.chat.open', args);
+          opened = true;
+          break;
+        } catch {
+          /* try the next fallback */
         }
+      }
+      if (!opened) {
+        vscode.window.showWarningMessage("Couldn't open chat for implementation.");
+      }
+    }),
+    // Scaffold the "Foundry" custom agent into the workspace so agent-mode work is
+    // scoped to the local index. One-click adoption; the file is committable/shareable.
+    vscode.commands.registerCommand('foundry.installAgent', async () => {
+      try {
+        const dest = vscode.Uri.file(path.join(workspaceRoot, FOUNDRY_AGENT_REL_PATH));
+        let exists = false;
+        try {
+          await vscode.workspace.fs.stat(dest);
+          exists = true;
+        } catch {
+          /* not present yet */
+        }
+        if (exists) {
+          const pick = await vscode.window.showWarningMessage(
+            `${FOUNDRY_AGENT_REL_PATH} already exists. Overwrite it?`,
+            'Overwrite',
+            'Cancel',
+          );
+          if (pick !== 'Overwrite') return;
+        }
+        await vscode.workspace.fs.createDirectory(
+          vscode.Uri.file(path.join(workspaceRoot, path.dirname(FOUNDRY_AGENT_REL_PATH))),
+        );
+        await vscode.workspace.fs.writeFile(dest, Buffer.from(FOUNDRY_AGENT_MD, 'utf8'));
+        vscode.window.showInformationMessage(
+          `Installed the "${FOUNDRY_AGENT_NAME}" agent at ${FOUNDRY_AGENT_REL_PATH}. ` +
+            'Pick it from the chat mode dropdown, and verify its edit/run tools in the Tools picker.',
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(`Couldn't install the Foundry agent: ${String(err)}`);
       }
     }),
   );

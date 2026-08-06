@@ -180,3 +180,17 @@ button that hands the plan to VS Code's built-in agent for execution (`@codebase
 read-only). After that hand-off you (the agent) **cannot re-invoke the `@codebase`
 participant or its `/plan` command** — instead re-search with the `foundry_*` tools /
 `#foundryCodebase` and re-plan with `foundry_plan`.
+
+## The "Foundry" implementation agent
+
+For implementation work there's a dedicated **`Foundry` custom agent**
+(`.github/agents/foundry.agent.md`; install it with the command **“Foundry: Install
+implementation agent”**, or add the file by hand). Its `tools:` allowlist is scoped to the
+`foundry_*` tools plus the built-in edit/run tools, and it **omits the built-in
+codebase/usages search** — so in this agent, code lookups are served only by the local
+Foundry index (far fewer tokens; nothing leaves the machine). Pick **Foundry** from the chat
+mode dropdown for any codebase work; the **⚡ Implement in agent mode** hand-off targets it
+automatically. Behaviour in this agent: if a plan is provided, follow it (don't re-run a
+discovery loop); otherwise investigate with `foundry_*` first, then implement. If a
+`foundry_*` tool reports the index isn't built, tell the user to build it or to re-run in a
+standard agent/ask mode — do **not** fall back to bulk file reads or text search.
