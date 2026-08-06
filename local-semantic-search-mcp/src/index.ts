@@ -53,6 +53,10 @@ async function main() {
   mkdirSync(dataDir, { recursive: true });
   const store = new VectorStore(join(dataDir, 'index.db'));
 
+  // Held so shutdown can stop the file watcher (its native fs handles keep the
+  // event loop — and thus the process — alive after the client disconnects).
+  let watcher: ReturnType<typeof startWatcher> | undefined;
+
   // Query-only mode: never build, watch, or mutate the index — just load the
   // embedder and answer searches against whatever index already exists. This
   // is what a read-only client (e.g. the editor search panel) spawns so it can
@@ -235,7 +239,7 @@ async function main() {
           ),
         );
     };
-    startWatcher(workspaceRoot, indexer, config.exclude, onFileIndexed);
+    watcher = startWatcher(workspaceRoot, indexer, config.exclude, onFileIndexed);
     console.error('[swe-search] incremental watch active');
   })();
   ready.catch((err) => {
@@ -375,6 +379,26 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('[swe-search] MCP server connected (indexing in background)');
+
+  // Exit cleanly when the host disconnects, so VS Code "stop server" doesn't leave
+  // an orphan holding the file watcher + DB. VS Code stops a stdio MCP server by
+  // closing our stdin pipe — often WITHOUT a signal — so the reliable trigger is
+  // stdin EOF, not just SIGTERM/SIGINT. This runs for EVERY instance (query-only
+  // included); lock.ts only handles signals, and only for the lock holder.
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Stop the watcher's fs handles first so nothing keeps the loop alive, then
+    // exit definitively (lock.ts's 'exit' handler releases the lock file).
+    Promise.resolve(watcher?.close())
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
+  };
+  process.stdin.on('end', shutdown);
+  process.stdin.on('close', shutdown);
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 main().catch((err) => {
