@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.22",
+  "version": "0.10.0",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -44,6 +44,10 @@
           {
             "name": "graph",
             "description": "Render a Mermaid call graph for a symbol (prefix 'callers' to invert)"
+          },
+          {
+            "name": "implement",
+            "description": "Compile the last plan into a workflow and run it — edits your files with per-step approval + Undo"
           }
         ]
       }
@@ -482,8 +486,18 @@
         "category": "Foundry"
       },
       {
-        "command": "foundry.installAgent",
-        "title": "Install implementation agent",
+        "command": "foundry.executePlanHere",
+        "title": "Implement plan here (Foundry engine)",
+        "category": "Foundry"
+      },
+      {
+        "command": "foundry.keepChanges",
+        "title": "Keep changes from the last run",
+        "category": "Foundry"
+      },
+      {
+        "command": "foundry.undoChanges",
+        "title": "Undo all changes from the last run",
         "category": "Foundry"
       }
     ],
@@ -498,6 +512,18 @@
       "commandPalette": [
         {
           "command": "foundry.implementPlan",
+          "when": "false"
+        },
+        {
+          "command": "foundry.executePlanHere",
+          "when": "false"
+        },
+        {
+          "command": "foundry.keepChanges",
+          "when": "false"
+        },
+        {
+          "command": "foundry.undoChanges",
           "when": "false"
         }
       ]

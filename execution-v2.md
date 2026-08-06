@@ -114,13 +114,17 @@ Edit-script example:
 - **Per-step approval with an auto-apply toggle.** Default: show the step's proposed change as a
   **diff** and wait for approve. A **"apply the rest automatically"** control lets the user hand
   the wheel to the engine for the remainder of the run (agent-style auto-approve).
-- **Git snapshot before a run** (stash/commit-to-scratch or require a clean tree) captures the
-  pre-run state; it backs the workflow-level undo below.
+- **Pre-run checkpoint (file-level).** Before any op edits a file, the engine records that file's
+  original bytes (once), via `vscode.workspace.fs`. This is preferred over a `git stash` snapshot:
+  it needs no clean tree, no git subprocess, works over Remote/WSL, reverts *only* the files the
+  run touched (never clobbers unrelated edits), and captures cross-file edits (e.g. a rename
+  provider touching many files) because capture is driven by the files each op declares.
 - **Workflow-level Keep vs Undo (all changes).** Every file edit from a run is grouped into one
   checkpoint. When the run finishes *or is stopped*, the chat offers **[Keep changes] / [Undo
-  all]**. Undo restores the working tree to the pre-run snapshot, discarding every change from the
-  run — so the user can apply, manually test, then revert cleanly. (Edits are saved to disk
-  incrementally, so Undo must restore from the snapshot, not the editor undo stack.)
+  all]**. Undo restores each captured file to its pre-run content (or deletes files the run
+  created), discarding every change from the run — so the user can apply, manually test, then
+  revert cleanly. (Edits are saved to disk incrementally, so Undo restores from the checkpoint,
+  not the editor undo stack.)
 - Edits applied via `vscode.workspace.applyEdit` then formatted (`format_document`) + saved.
 
 ## 8. Completion conditions
@@ -203,17 +207,17 @@ big-bang the current flat `src/`.
 2. Workflow IR is the single source of truth for a run.
 3. Execution is deterministic; the only in-run reasoning is a **bounded** orchestrator re-plan.
 4. Edits are anchored to symbols and re-resolved per operation.
-5. Every run is recoverable: a pre-run git snapshot backs a workflow-level **Keep vs Undo all**,
-   plus per-step approval or explicit auto-apply.
+5. Every run is recoverable: a pre-run file-level checkpoint backs a workflow-level **Keep vs
+   Undo all**, plus per-step approval or explicit auto-apply.
 6. Every step declares its executor and completion condition.
 7. New executors add without changing the planner.
 8. Ship linear first; resumability slots into a pre-defined interface.
 
 ## 16. Phased rollout
 
-- **P1** — IR types + compiler + WorkspaceExecutor (full op set) + per-step approval/diff +
-  linear scheduler + progress streaming + **git snapshot & workflow-level Keep/Undo**. Keep
-  "Implement in agent mode" as a manual escape.
+- **P1** — IR types + compiler + WorkspaceExecutor (full op set) + per-step approval +
+  linear scheduler + progress streaming + **file-level checkpoint & workflow-level Keep/Undo**.
+  Keep "Implement in agent mode" as a manual escape. _(Done — v0.10.0.)_
 - **P2** — TerminalExecutor + ValidationExecutor + bounded repair loop.
 - **P3** — UserExecutor (pause/resume) + auto-apply toggle polish.
 - **P4** — persisted state + resume + crash recovery + diff-approval refinements.

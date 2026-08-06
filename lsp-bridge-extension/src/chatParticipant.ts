@@ -3,6 +3,7 @@ import type { SearchClient } from './searchClient';
 import { FOUNDRY_TOOL_PREFIX } from './languageModelTools';
 import { moduleGraphMermaid, callGraphMermaid, type ModuleNode, type FlowNodeLite } from './mermaid';
 import { gatherPlanContext, PLAN_PREAMBLE, head, type SearchHit } from './planContext';
+import { runImplement } from './implement';
 
 // The @codebase chat participant. It answers questions about THIS workspace by
 // letting the model drive our local MCP tools (registered as Language Model
@@ -148,6 +149,9 @@ export function registerChatParticipant(
         stream.progress('Gathering workspace context for planning…');
         const { seed, target } = await gatherPlanContext(client, request.prompt, output);
         return await runPlan(request, stream, token, seed, target, client, output);
+      }
+      if (request.command === 'implement') {
+        return await runImplement(request, chatContext, stream, token, output);
       }
       return await runAgentic(request, chatContext, stream, token, BASE_PREAMBLE, client, output);
     } catch (err) {
@@ -456,21 +460,25 @@ async function runAgentic(
   return {};
 }
 
-// Render the "⚡ Implement in agent mode" button. Clicking it invokes the
-// foundry.implementPlan command (registered in extension.ts), which opens VS
-// Code's built-in agent mode pre-filled with the plan. We pass BOTH the user's
-// original request (their real intent/phrasing) and `content` (the derived
-// plan/answer), so the agent grounds on what was actually asked — not just the
-// synthesis. @codebase can't edit or run commands itself (Chat Participant API
-// limitation), so this is the supported hand-off to the agent that can — and
-// that agent can still call our foundry_* tools / foundry_plan for more search
-// and planning mid-implementation.
+// Offer to implement the plan/answer just produced. Two paths:
+//   ▶ Implement here (Foundry) — the PRIMARY, in-house path: opens `@codebase
+//     /implement`, which compiles this plan into a Workflow IR and executes it with
+//     per-step approval + Keep/Undo, all on the local index (see implement.ts).
+//   ⚡ Implement in agent mode — the manual ESCAPE: hands the plan to VS Code's
+//     built-in agent mode (full native toolset) via foundry.implementPlan. Kept for
+//     when in-house execution isn't the right fit.
+// @codebase itself can't edit files (Chat Participant API limitation); both buttons
+// route to a surface that can.
 function offerImplementHandoff(
   stream: vscode.ChatResponseStream,
   request: string,
   content: string,
 ): void {
   if (!content || content.trim().length < 40) return; // nothing substantive to hand off
+  stream.button({
+    command: 'foundry.executePlanHere',
+    title: '▶ Implement here (Foundry)',
+  });
   stream.button({
     command: 'foundry.implementPlan',
     title: '⚡ Implement in agent mode',

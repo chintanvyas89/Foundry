@@ -175,22 +175,19 @@ There's also a `@codebase` chat
 participant that answers workspace questions by driving these tools itself. For a
 visual overview, `@codebase /arch` renders a Mermaid module dependency graph and
 `@codebase /graph <symbol>` renders a Mermaid call graph (both offline, no model
-call). `@codebase`/`@codebase /plan` answers end with an **⚡ Implement in agent mode**
-button that hands the plan to VS Code's built-in agent for execution (`@codebase` is
-read-only). After that hand-off you (the agent) **cannot re-invoke the `@codebase`
-participant or its `/plan` command** — instead re-search with the `foundry_*` tools /
-`#foundryCodebase` and re-plan with `foundry_plan`.
+call). `@codebase`/`@codebase /plan` answers end with two buttons: **▶ Implement here
+(Foundry)** and **⚡ Implement in agent mode**.
 
-## The "Foundry" implementation agent
+## Executing a plan: `@codebase /implement`
 
-For implementation work there's a dedicated **`Foundry` custom agent**
-(`.github/agents/foundry.agent.md`; install it with the command **“Foundry: Install
-implementation agent”**, or add the file by hand). Its `tools:` allowlist is scoped to the
-`foundry_*` tools plus the built-in edit/run tools, and it **omits the built-in
-codebase/usages search** — so in this agent, code lookups are served only by the local
-Foundry index (far fewer tokens; nothing leaves the machine). Pick **Foundry** from the chat
-mode dropdown for any codebase work; the **⚡ Implement in agent mode** hand-off targets it
-automatically. Behaviour in this agent: if a plan is provided, follow it (don't re-run a
-discovery loop); otherwise investigate with `foundry_*` first, then implement. If a
-`foundry_*` tool reports the index isn't built, tell the user to build it or to re-run in a
-standard agent/ask mode — do **not** fall back to bulk file reads or text search.
+`@codebase /implement` is the in-house execution path (see `execution-v2.md`). It compiles
+the most recent plan into a deterministic **Workflow IR** and runs it inside the extension:
+each step is applied via `vscode.workspace.applyEdit` with per-step approval (and an
+"apply all remaining" toggle), progress streams to the chat, and the run ends with
+**Keep / Undo-all** controls backed by a file-level checkpoint (revert only the files the
+run touched). Reasoning lives only in the planner; the executors are deterministic, with a
+bounded orchestrator repair loop (P2) on validation failure. The **⚡ Implement in agent
+mode** button remains as a manual escape to VS Code's built-in agent (full native toolset)
+when in-house execution isn't the right fit. There is no longer a separate "Foundry" custom
+agent — the `foundry_*` tools / `#foundryCodebase` are available directly in normal agent
+mode.

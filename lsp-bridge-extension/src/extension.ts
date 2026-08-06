@@ -11,8 +11,7 @@ import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
 import { registerLanguageModelTools } from './languageModelTools';
 import { registerChatParticipant } from './chatParticipant';
-import { FOUNDRY_AGENT_MD, FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_REL_PATH } from './foundryAgent';
-import * as path from 'path';
+import { registerImplementCommands } from './implement';
 
 let server: net.Server | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
@@ -47,89 +46,58 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('sweSearch.focusPanel', () =>
       vscode.commands.executeCommand('sweSearch.panel.focus'),
     ),
-    // Hand off a plan/answer from @codebase (read-only) to VS Code's built-in
-    // agent mode (which has edit/terminal tools). Invoked by the "⚡ Implement in
-    // agent mode" button rendered in @codebase responses. The agent can still
-    // call the foundry_* tools / foundry_plan for more search and planning.
+    // Manual ESCAPE hatch: hand a plan/answer from @codebase (read-only) to VS
+    // Code's built-in agent mode (full native toolset). The primary path is now
+    // in-house execution (@codebase /implement, see implement.ts); this button
+    // remains for when agent mode is the better fit.
     vscode.commands.registerCommand(
       'foundry.implementPlan',
       async (payload?: string | { request?: string; content?: string }) => {
-      // Accept the structured payload from the button, or a bare string (older
-      // buttons / manual invocation).
-      const request = typeof payload === 'object' ? (payload?.request ?? '').trim() : '';
-      const content = (typeof payload === 'string' ? payload : payload?.content ?? '').trim();
-      if (!content) {
-        vscode.window.showInformationMessage('Nothing to implement — no plan text was captured.');
-        return;
-      }
-      // LEAN sectioned prompt. All behaviour (plan is authoritative, foundry-only
-      // exploration, etc.) now lives in the "Foundry" custom agent under its
-      // "execute-plan mode" section — the query only needs to declare the mode and
-      // carry the intent + plan. (mode: 'Foundry' selects the agent; the `Mode:`
-      // MARKER here is a content signal the agent keys on, since the chat command's
-      // own `mode` field is already used to pick the agent.)
-      const sections = [
-        'Mode: execute-plan',
-        request ? `## Original request (the user's intent)\n\n${request}` : '',
-        `## Plan to implement\n\n${content}`,
-      ];
-      const query = sections.filter(Boolean).join('\n\n');
-      // Prefer the "Foundry" custom agent (tool scope + full policy live in the agent
-      // file). Fall back to plain agent mode, then a bare open, for older VS Code or
-      // when the agent file isn't installed. Some builds ignore an unknown mode rather
-      // than throwing, which is fine — the query still lands in a usable chat.
-      const attempts: Array<Record<string, unknown>> = [
-        { query, mode: FOUNDRY_AGENT_NAME },
-        { query, mode: 'agent' },
-        { query },
-      ];
-      let opened = false;
-      for (const args of attempts) {
-        try {
-          await vscode.commands.executeCommand('workbench.action.chat.open', args);
-          opened = true;
-          break;
-        } catch {
-          /* try the next fallback */
+        const request = typeof payload === 'object' ? (payload?.request ?? '').trim() : '';
+        const content = (typeof payload === 'string' ? payload : payload?.content ?? '').trim();
+        if (!content) {
+          vscode.window.showInformationMessage('Nothing to implement — no plan text was captured.');
+          return;
         }
-      }
-      if (!opened) {
-        vscode.window.showWarningMessage("Couldn't open chat for implementation.");
-      }
-    }),
-    // Scaffold the "Foundry" custom agent into the workspace so agent-mode work is
-    // scoped to the local index. One-click adoption; the file is committable/shareable.
-    vscode.commands.registerCommand('foundry.installAgent', async () => {
+        const sections = [
+          request ? `## Original request (the user's intent)\n\n${request}` : '',
+          `## Plan to implement\n\n${content}`,
+          'The plan above is authoritative — execute it; use #foundryCodebase / the ' +
+            'foundry_* tools for any extra lookup rather than a broad discovery pass.',
+        ];
+        const query = sections.filter(Boolean).join('\n\n');
+        // Open normal agent mode; fall back to a bare open on older builds.
+        const attempts: Array<Record<string, unknown>> = [{ query, mode: 'agent' }, { query }];
+        let opened = false;
+        for (const args of attempts) {
+          try {
+            await vscode.commands.executeCommand('workbench.action.chat.open', args);
+            opened = true;
+            break;
+          } catch {
+            /* try the next fallback */
+          }
+        }
+        if (!opened) {
+          vscode.window.showWarningMessage("Couldn't open chat for implementation.");
+        }
+      },
+    ),
+    // Primary in-house path: open `@codebase /implement`, which compiles the most
+    // recent plan (from this chat's history) into a Workflow IR and executes it.
+    vscode.commands.registerCommand('foundry.executePlanHere', async () => {
       try {
-        const dest = vscode.Uri.file(path.join(workspaceRoot, FOUNDRY_AGENT_REL_PATH));
-        let exists = false;
-        try {
-          await vscode.workspace.fs.stat(dest);
-          exists = true;
-        } catch {
-          /* not present yet */
-        }
-        if (exists) {
-          const pick = await vscode.window.showWarningMessage(
-            `${FOUNDRY_AGENT_REL_PATH} already exists. Overwrite it?`,
-            'Overwrite',
-            'Cancel',
-          );
-          if (pick !== 'Overwrite') return;
-        }
-        await vscode.workspace.fs.createDirectory(
-          vscode.Uri.file(path.join(workspaceRoot, path.dirname(FOUNDRY_AGENT_REL_PATH))),
-        );
-        await vscode.workspace.fs.writeFile(dest, Buffer.from(FOUNDRY_AGENT_MD, 'utf8'));
-        vscode.window.showInformationMessage(
-          `Installed the "${FOUNDRY_AGENT_NAME}" agent at ${FOUNDRY_AGENT_REL_PATH}. ` +
-            'Pick it from the chat mode dropdown, and verify its edit/run tools in the Tools picker.',
-        );
-      } catch (err) {
-        vscode.window.showErrorMessage(`Couldn't install the Foundry agent: ${String(err)}`);
+        await vscode.commands.executeCommand('workbench.action.chat.open', {
+          query: '@codebase /implement',
+        });
+      } catch {
+        vscode.window.showWarningMessage("Couldn't open @codebase to implement the plan.");
       }
     }),
   );
+
+  // Keep/Undo commands for the in-house execution engine's checkpoints.
+  registerImplementCommands(context);
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
   statusItem.text = '$(circle-outline) LSP Bridge: starting';
