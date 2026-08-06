@@ -3,21 +3,35 @@
 ## Mandatory workflow for implementation tasks
 
 For any task that involves implementing, changing, debugging, or extending
-existing behavior, use the semantic-search workflow first.
+existing behavior, resolve code questions through this workspace's **local Foundry
+index FIRST** — it is faster and uses **far fewer tokens** than reading or
+searching files directly.
+
+In **agent mode** these are the `foundry_*` Language Model tools; in `@codebase`
+chat / MCP they are the bare names shown in parentheses. Same index either way.
 
 Required behavior:
-1. If the task requires understanding existing implementation, use semantic_search
-   to locate the relevant symbols, modules, or functions by meaning.
-2. If the task involves execution flow, call trace_calls on the relevant symbol
-   to inspect callers and callees before making changes.
-3. Only after semantic_search and trace_calls have been used should you read
-   specific files or use targeted text search for details.
-4. Do not rely on broad grep or ad-hoc file reading as the primary approach when
-   the goal is to understand or modify existing implementation.
+1. Understand existing implementation by MEANING with `foundry_semanticSearch`
+   (`#foundryCodebase` / `semantic_search`) — "where is X handled", "what does Y".
+   Already know the exact symbol name (function/class/type/const)? Use
+   `foundry_searchSymbol` (`search_symbol`) instead — it's an exact lookup.
+2. For execution flow and change impact, use `foundry_traceCalls` (`trace_calls`),
+   `foundry_showExecutionFlow`, and `foundry_findUsages` (`find_usages`) to see
+   callers/callees and every use site BEFORE editing — not a text search for the name.
+3. To read code, use `foundry_readFile` (`read_file`) TWO-PASS — outline first
+   (pass just `file`), then the specific body you need (`symbol=`) — rather than
+   reading whole files.
+4. For config in `.yml`/`.json` (routes, fields, services, module dependencies)
+   use `foundry_searchConfig` (`search_config`) — config is never embedded, so it
+   is NOT in semantic search.
+5. Only open a file directly when you are about to EDIT it. Reading a file you are
+   editing is fine; using direct file reads or the built-in codebase/text search
+   to EXPLORE the codebase is **not** — route exploration through the tools above.
 
 This applies even when the user asks for a direct implementation request such as
-"implement X" or "fix Y"; in those cases, the agent should still inspect the
-current code paths through semantic_search and trace_calls before editing.
+"implement X" or "fix Y"; in those cases, still inspect the current code paths
+through the Foundry tools before editing. Need to (re)plan a change first? Use
+`foundry_plan` — it returns a grounded context pack plus a plan template.
 
 ## Finding code in this workspace
 

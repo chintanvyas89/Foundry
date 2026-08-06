@@ -60,12 +60,29 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage('Nothing to implement — no plan text was captured.');
         return;
       }
-      // Lead with the user's ORIGINAL request so the agent grounds on their real
-      // intent, then the derived plan/answer, then how to fetch more context.
+      // Front-load a firm TOOL POLICY so the built-in agent routes lookups through
+      // the local Foundry index instead of its own (token-heavy) file reads and
+      // codebase search. It's placed BEFORE the plan because the agent leans on
+      // whatever it sees first; a soft mention after the plan gets ignored. We
+      // can't hard-restrict the agent's tools from a third-party extension, so
+      // this in-context directive is the reliable lever. Then the user's original
+      // request (real intent), then the plan/answer to execute.
       const query = [
+        'Implement the task below in this workspace.',
+        'TOOL POLICY — this workspace has a LOCAL Foundry code index; using it costs ' +
+          'far fewer tokens than reading/searching files directly. For ANY code lookup ' +
+          'during this task, use these FIRST — do NOT fall back to the built-in codebase ' +
+          'search or bulk file reads for exploration:\n' +
+          '• find code by meaning / "where is X handled" → #foundryCodebase (foundry_semanticSearch)\n' +
+          '• a known symbol name (function/class/type/const) → foundry_searchSymbol\n' +
+          "• a file's structure or one symbol's body → foundry_readFile (outline first with just `file`, then `symbol=`)\n" +
+          '• who calls it / where it is used / impact → foundry_findUsages, foundry_traceCalls, foundry_showExecutionFlow\n' +
+          '• config in .yml/.json (routes, fields, services, module deps) → foundry_searchConfig (never embedded; not in semantic search)\n' +
+          '• need to (re)plan a sub-part → foundry_plan\n' +
+          'Only open a file directly when you are about to EDIT it — reading a file you are ' +
+          'editing is fine; using direct reads/search to EXPLORE the codebase is not.',
         request ? `Original request: ${request}` : '',
-        'Implement the following plan/answer. Use #foundryCodebase / the foundry_* tools ' +
-          '(and foundry_plan) for any lookups or further planning:',
+        'Plan / answer to implement:',
         content,
       ]
         .filter(Boolean)
