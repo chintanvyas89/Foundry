@@ -36,7 +36,7 @@ export async function buildEditForOperation(
     case 'replace_function':
     case 'replace_method':
     case 'replace_block': {
-      const r = await resolveSymbol(op.target);
+      const r = await resolveSymbol(op.target, workspaceRoot);
       edit.replace(r.document.uri, r.fullRange, op.replacement);
       return { edit, files: [abs(op.target.file)], note: `replace ${op.target.symbol}` };
     }
@@ -54,7 +54,7 @@ export async function buildEditForOperation(
 
     case 'insert_before':
     case 'insert_after': {
-      const r = await resolveSymbol(op.target);
+      const r = await resolveSymbol(op.target, workspaceRoot);
       if (op.operation === 'insert_before') {
         const pos = new vscode.Position(r.fullRange.start.line, 0);
         edit.insert(r.document.uri, pos, op.code.endsWith('\n') ? op.code : op.code + '\n');
@@ -116,7 +116,7 @@ export async function buildEditForOperation(
     }
 
     case 'rename_symbol': {
-      const r = await resolveSymbol(op.target);
+      const r = await resolveSymbol(op.target, workspaceRoot);
       const renameEdit = await vscode.commands.executeCommand<vscode.WorkspaceEdit | undefined>(
         'vscode.executeDocumentRenameProvider',
         r.document.uri,

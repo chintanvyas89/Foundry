@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -461,9 +461,19 @@
           "id": "sweSearch.panel",
           "name": "Search",
           "type": "webview"
+        },
+        {
+          "id": "foundry.executionView",
+          "name": "Foundry Execution"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "foundry.executionView",
+        "contents": "No Foundry execution is running.\n\nDraft a change with `@codebase /plan`, then choose **▶ Implement here (Foundry)** to run it here step-by-step — review each step's diff, then Approve / Skip / Apply all.\n\n[Open @codebase chat](command:workbench.action.chat.open)"
+      }
+    ],
     "commands": [
       {
         "command": "sweSearch.searchByMeaning",
@@ -491,14 +501,46 @@
         "category": "Foundry"
       },
       {
-        "command": "foundry.keepChanges",
-        "title": "Keep changes from the last run",
-        "category": "Foundry"
+        "command": "foundry.exec.approve",
+        "title": "Approve step",
+        "category": "Foundry",
+        "icon": "$(check)"
       },
       {
-        "command": "foundry.undoChanges",
-        "title": "Undo all changes from the last run",
-        "category": "Foundry"
+        "command": "foundry.exec.skip",
+        "title": "Skip step",
+        "category": "Foundry",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "foundry.exec.openDiff",
+        "title": "Open diff",
+        "category": "Foundry",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "foundry.exec.applyAll",
+        "title": "Apply all remaining",
+        "category": "Foundry",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "foundry.exec.cancel",
+        "title": "Cancel run",
+        "category": "Foundry",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "foundry.exec.keep",
+        "title": "Keep changes",
+        "category": "Foundry",
+        "icon": "$(save)"
+      },
+      {
+        "command": "foundry.exec.undo",
+        "title": "Undo all changes",
+        "category": "Foundry",
+        "icon": "$(discard)"
       }
     ],
     "menus": {
@@ -519,12 +561,71 @@
           "when": "false"
         },
         {
-          "command": "foundry.keepChanges",
+          "command": "foundry.exec.approve",
           "when": "false"
         },
         {
-          "command": "foundry.undoChanges",
+          "command": "foundry.exec.skip",
           "when": "false"
+        },
+        {
+          "command": "foundry.exec.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "foundry.exec.applyAll",
+          "when": "false"
+        },
+        {
+          "command": "foundry.exec.cancel",
+          "when": "false"
+        },
+        {
+          "command": "foundry.exec.keep",
+          "when": "false"
+        },
+        {
+          "command": "foundry.exec.undo",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "foundry.exec.applyAll",
+          "when": "view == foundry.executionView && foundry.exec.running",
+          "group": "navigation@1"
+        },
+        {
+          "command": "foundry.exec.cancel",
+          "when": "view == foundry.executionView && foundry.exec.running",
+          "group": "navigation@2"
+        },
+        {
+          "command": "foundry.exec.keep",
+          "when": "view == foundry.executionView && foundry.exec.canReview",
+          "group": "navigation@3"
+        },
+        {
+          "command": "foundry.exec.undo",
+          "when": "view == foundry.executionView && foundry.exec.canReview",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "foundry.exec.approve",
+          "when": "view == foundry.executionView && viewItem == foundry.step.active",
+          "group": "inline@1"
+        },
+        {
+          "command": "foundry.exec.skip",
+          "when": "view == foundry.executionView && viewItem == foundry.step.active",
+          "group": "inline@2"
+        },
+        {
+          "command": "foundry.exec.openDiff",
+          "when": "view == foundry.executionView && viewItem =~ /^foundry.step/",
+          "group": "inline@3"
         }
       ]
     },

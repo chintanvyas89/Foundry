@@ -11,7 +11,8 @@ import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
 import { registerLanguageModelTools } from './languageModelTools';
 import { registerChatParticipant } from './chatParticipant';
-import { registerImplementCommands } from './implement';
+import { setExecutionController } from './implement';
+import { ExecutionController } from './executionView';
 
 let server: net.Server | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
@@ -96,8 +97,13 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // Keep/Undo commands for the in-house execution engine's checkpoints.
-  registerImplementCommands(context);
+  // In-house execution engine: the Foundry Execution view runs compiled workflows
+  // step-by-step (Approve/Skip/Apply-all + native-diff review + Keep/Undo).
+  const execOutput = vscode.window.createOutputChannel('Foundry Execution');
+  context.subscriptions.push(execOutput);
+  const executionController = new ExecutionController(execOutput);
+  executionController.register(context);
+  setExecutionController(executionController);
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
   statusItem.text = '$(circle-outline) LSP Bridge: starting';

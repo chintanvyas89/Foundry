@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { SymbolTarget } from '../execution/ir';
 
 // Resolve a SymbolTarget to a concrete range in the CURRENT buffer.
@@ -39,8 +40,15 @@ interface Candidate {
   selectionRange: vscode.Range;
 }
 
-export async function resolveSymbol(target: SymbolTarget): Promise<ResolvedSymbol> {
-  const uri = vscode.Uri.file(target.file);
+export async function resolveSymbol(
+  target: SymbolTarget,
+  workspaceRoot: string,
+): Promise<ResolvedSymbol> {
+  // IR file paths are workspace-relative; join them to the root before making a
+  // Uri. (vscode.Uri.file on a relative path silently prefixes "/", producing a
+  // bogus filesystem-root path like /web/themes/… .)
+  const filePath = path.isAbsolute(target.file) ? target.file : path.join(workspaceRoot, target.file);
+  const uri = vscode.Uri.file(filePath);
   const document = await vscode.workspace.openTextDocument(uri);
 
   const raw = await vscode.commands.executeCommand<

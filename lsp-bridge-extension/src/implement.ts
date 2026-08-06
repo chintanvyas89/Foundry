@@ -1,42 +1,16 @@
 import * as vscode from 'vscode';
 import { compilePlan } from './planner/workflowCompiler';
-import { ExecutionEngine, EngineRunResult } from './execution/executionEngine';
-import { ProgressReporter } from './execution/context';
-import { WorkspaceCheckpoint } from './execution/checkpoint';
-import { WorkspaceExecutor } from './executors/workspaceExecutor';
-import { DeferredExecutor } from './executors/deferredExecutor';
-import { Workflow } from './execution/ir';
+import { ExecutionController, EXECUTION_VIEW_ID } from './executionView';
 
-// The in-house execution path (execution-v2.md). `@codebase /implement` compiles the
-// most recent plan into Workflow IR and runs it through the ExecutionEngine, all in
-// ONE chat turn: progress streams to the chat, per-step approval uses a modal prompt
-// (a turn can await a window dialog while still streaming), and the run ends with
-// Keep / Undo-all controls backed by the file-level checkpoint.
+// `@codebase /implement` — the in-house execution entry point (execution-v2.md).
+// It compiles the most recent plan into a Workflow IR and hands it to the Foundry
+// Execution view, which runs it step-by-step with native-diff review + Keep/Undo.
+// Chat stays for planning and steering; the view owns execution.
 
-// Checkpoints from completed runs, so the Keep/Undo buttons (which fire in a later
-// turn as plain commands) can find the right one. Not persisted across reloads.
-const checkpoints = new Map<string, WorkspaceCheckpoint>();
+let controller: ExecutionController | undefined;
 
-export function registerImplementCommands(context: vscode.ExtensionContext): void {
-  context.subscriptions.push(
-    vscode.commands.registerCommand('foundry.undoChanges', async (runId?: string) => {
-      const cp = runId ? checkpoints.get(runId) : undefined;
-      if (!cp) {
-        vscode.window.showInformationMessage('Foundry: nothing to undo — this run was already resolved.');
-        return;
-      }
-      const { restored, failed } = await cp.restore();
-      checkpoints.delete(runId!);
-      vscode.window.showInformationMessage(
-        `Foundry: reverted ${restored} file${restored === 1 ? '' : 's'} to the pre-run state` +
-          (failed ? ` (${failed} could not be restored)` : '') + '.',
-      );
-    }),
-    vscode.commands.registerCommand('foundry.keepChanges', async (runId?: string) => {
-      if (runId) checkpoints.delete(runId);
-      vscode.window.showInformationMessage('Foundry: kept all changes from this run.');
-    }),
-  );
+export function setExecutionController(c: ExecutionController): void {
+  controller = c;
 }
 
 export async function runImplement(
@@ -49,6 +23,10 @@ export async function runImplement(
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
     stream.markdown('Open a folder in VS Code first — there is nothing to implement against.');
+    return {};
+  }
+  if (!controller) {
+    stream.markdown('_The Foundry Execution view isn’t ready. Reload the window and try again._');
     return {};
   }
 
@@ -71,105 +49,30 @@ export async function runImplement(
   }
   const workflow = compiled.workflow;
 
-  renderWorkflowHeader(stream, workflow);
-
-  const progress: ProgressReporter = { info: (m) => stream.markdown(`\n${m}  `) };
-  const engine = new ExecutionEngine();
-  let result: EngineRunResult;
+  controller.start(workflow, workspaceRoot);
   try {
-    result = await engine.run({
-      workflow,
-      workspaceRoot,
-      executors: [new WorkspaceExecutor(), new DeferredExecutor()],
-      token,
-      hooks: {
-        progress,
-        approveStep: (step, summary) => approveStep(stream, step.title, summary),
-        replan: async () => [], // bounded repair loop is P2
-      },
-    });
-  } catch (err) {
-    const m = err instanceof Error ? err.message : String(err);
-    output.appendLine(`[implement] engine error: ${m}`);
-    stream.markdown(`\n\n_Execution failed unexpectedly: ${m}_`);
-    return { errorDetails: { message: m } };
+    await vscode.commands.executeCommand(`${EXECUTION_VIEW_ID}.focus`);
+  } catch {
+    /* view focus is best-effort */
   }
 
-  renderOutcome(stream, workflow, result, originalRequest, planText);
-  return {};
-}
-
-// Modal approval for one step. Streaming continues around it; the turn simply
-// awaits the user's choice. Dismissing (or Cancel) stops the whole workflow.
-async function approveStep(
-  stream: vscode.ChatResponseStream,
-  title: string,
-  summary: string,
-): Promise<'apply' | 'skip' | 'auto' | 'cancel'> {
-  stream.markdown(`\n\n**Next: ${title}**\n\n${summary}\n`);
-  const choice = await vscode.window.showInformationMessage(
-    `Apply step: ${title}?`,
-    { modal: true, detail: summary },
-    'Apply',
-    'Skip',
-    'Apply all remaining',
-  );
-  if (choice === 'Apply') return 'apply';
-  if (choice === 'Skip') return 'skip';
-  if (choice === 'Apply all remaining') return 'auto';
-  return 'cancel';
-}
-
-function renderWorkflowHeader(stream: vscode.ChatResponseStream, workflow: Workflow): void {
-  stream.markdown(`### Executing: ${workflow.objective || 'plan'}\n\n`);
+  stream.markdown(`### ${workflow.objective || 'Execution plan'}\n\n`);
   if (workflow.summary) stream.markdown(`${workflow.summary}\n\n`);
+  stream.markdown(
+    'Opened in the **Foundry Execution** view (Activity Bar → Semantic Search). For each step: ' +
+      '**Open diff** to review, then **Approve** / **Skip** — or **Apply all** to run the rest. ' +
+      'When you’re done: **Keep** or **Undo all**.\n\n',
+  );
   workflow.steps.forEach((s, i) => {
     stream.markdown(`${i + 1}. **${s.title}** _(${s.executor})_\n`);
   });
-  stream.markdown('\n');
+  // Manual escape if the in-house run isn't the right fit.
+  offerAgentModeEscape(stream, originalRequest, planText);
+  return {};
 }
 
-function renderOutcome(
-  stream: vscode.ChatResponseStream,
-  workflow: Workflow,
-  result: EngineRunResult,
-  originalRequest: string,
-  planText: string,
-): void {
-  const edited = result.editedFiles;
-  stream.markdown('\n\n---\n');
-
-  if (result.outcome === 'completed') {
-    stream.markdown(`✅ **Workflow complete.** ${edited.length} file(s) changed.\n`);
-  } else if (result.outcome === 'cancelled') {
-    stream.markdown(`⏹ **Stopped.** ${edited.length} file(s) changed before you stopped.\n`);
-  } else {
-    const step = result.failedStep?.title ?? 'a step';
-    stream.markdown(
-      `❌ **Stopped at "${step}".** ${result.failure?.message ?? ''}\n\n` +
-        '_The bounded repair loop lands in P2; for now, tell me how to adjust and re-run ' +
-        '`/implement`, or use the agent-mode escape below._\n',
-    );
-  }
-
-  for (const f of edited) stream.reference(vscode.Uri.file(f));
-
-  // Keep vs Undo — restore/keep exactly the files this run touched.
-  if (result.checkpoint.size > 0) {
-    const runId = `run-${Date.now()}`;
-    checkpoints.set(runId, result.checkpoint);
-    stream.markdown('\n**Tested it? Keep the changes or revert the whole run:**\n');
-    stream.button({ command: 'foundry.keepChanges', title: '✓ Keep changes', arguments: [runId] });
-    stream.button({ command: 'foundry.undoChanges', title: '↩ Undo all changes', arguments: [runId] });
-  }
-
-  if (result.outcome !== 'completed') {
-    offerAgentModeEscape(stream, originalRequest, planText);
-  }
-}
-
-// The manual escape hatch (kept per the spec): push the plan to VS Code's built-in
-// agent mode, which has the full native toolset, if in-house execution stalls.
+// Push the plan to VS Code's built-in agent mode (full native toolset) — the
+// manual escape hatch when in-house execution isn't the right fit.
 function offerAgentModeEscape(
   stream: vscode.ChatResponseStream,
   request: string,

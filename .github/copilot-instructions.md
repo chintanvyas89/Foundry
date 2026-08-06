@@ -181,13 +181,15 @@ call). `@codebase`/`@codebase /plan` answers end with two buttons: **▶ Impleme
 ## Executing a plan: `@codebase /implement`
 
 `@codebase /implement` is the in-house execution path (see `execution-v2.md`). It compiles
-the most recent plan into a deterministic **Workflow IR** and runs it inside the extension:
-each step is applied via `vscode.workspace.applyEdit` with per-step approval (and an
-"apply all remaining" toggle), progress streams to the chat, and the run ends with
-**Keep / Undo-all** controls backed by a file-level checkpoint (revert only the files the
-run touched). Reasoning lives only in the planner; the executors are deterministic, with a
-bounded orchestrator repair loop (P2) on validation failure. The **⚡ Implement in agent
-mode** button remains as a manual escape to VS Code's built-in agent (full native toolset)
-when in-house execution isn't the right fit. There is no longer a separate "Foundry" custom
-agent — the `foundry_*` tools / `#foundryCodebase` are available directly in normal agent
-mode.
+the most recent plan into a deterministic **Workflow IR**, then hands it to the **Foundry
+Execution** view (Activity Bar → Semantic Search) — a native TreeView that runs the workflow
+step-by-step. For each step: **Open diff** shows VS Code's native side-by-side (current file
+vs. proposed content), then **Approve** applies it (via `vscode.workspace.applyEdit`) and
+advances, **Skip** skips, **Apply all** runs the rest, **Cancel** stops. When the run ends,
+**Keep** leaves the changes or **Undo all** reverts exactly the files the run touched (a
+file-level checkpoint). Chat stays for planning and steering — on a failed step, adjust in
+`@codebase` and re-run `/implement`. Reasoning lives only in the planner; the executors are
+deterministic, with a bounded orchestrator repair loop (P2) on validation failure. The
+**⚡ Continue in agent mode** button remains as a manual escape to VS Code's built-in agent
+(full native toolset). There is no longer a separate "Foundry" custom agent — the `foundry_*`
+tools / `#foundryCodebase` are available directly in normal agent mode.
