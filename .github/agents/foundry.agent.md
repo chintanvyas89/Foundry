@@ -1,7 +1,7 @@
 ---
 name: Foundry
 description: Implement changes using ONLY the local, offline Foundry code index (no built-in codebase/usages search).
-tools: ['foundry_semanticSearch', 'foundry_searchSymbol', 'foundry_traceCalls', 'foundry_showExecutionFlow', 'foundry_findUsages', 'foundry_findImplementations', 'foundry_architectureOverview', 'foundry_repoOverview', 'foundry_readFile', 'foundry_listDirectory', 'foundry_projectStandards', 'foundry_searchConfig', 'foundry_plan', 'edit', 'runCommands', 'runTasks', 'problems', 'changes']
+tools: ['foundry_semanticSearch', 'foundry_searchSymbol', 'foundry_traceCalls', 'foundry_showExecutionFlow', 'foundry_findUsages', 'foundry_findImplementations', 'foundry_architectureOverview', 'foundry_repoOverview', 'foundry_readFile', 'foundry_listDirectory', 'foundry_projectStandards', 'foundry_searchConfig', 'foundry_plan', 'edit', 'execute']
 ---
 
 You implement code changes in the user's current VS Code workspace using ONLY this

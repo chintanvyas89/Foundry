@@ -11,16 +11,18 @@ export const FOUNDRY_AGENT_REL_PATH = '.github/agents/foundry.agent.md';
 
 // NOTE ON TOOL IDS: `tools:` is an allowlist — only the listed tools are available
 // to the agent. The `foundry_*` names are this extension's Language Model tools.
-// `edit` / `runCommands` / `runTasks` / `problems` / `changes` are VS Code built-in
-// execution tools; their exact ids can vary by VS Code version. If the agent can't
-// edit or run commands, open it via the Tools picker ("Configure Tools") and enable
-// the execution tools — VS Code writes the correct ids for your version. We
-// deliberately OMIT `search/codebase` and `search/usages`: Foundry replaces them
-// (`foundry_semanticSearch` = `#foundryCodebase`, `foundry_findUsages`).
+// `edit` and `execute` are VS Code built-in tool GROUPS (bare namespace names) that
+// bundle the file-editing and terminal/task-running tools (e.g. `execute/runTask`,
+// `execute/getTerminalOutput`) — referenced by group so they auto-include the whole
+// set without pinning version-specific ids. We deliberately OMIT the `search` group
+// (`search/codebase`, `search/usages`): Foundry replaces it (`foundry_semanticSearch`
+// = `#foundryCodebase`, `foundry_findUsages`). If a build doesn't accept bare group
+// names, open the agent via the Tools picker ("Configure Tools") and enable the
+// edit/execute tools — VS Code writes the correct ids for your version.
 export const FOUNDRY_AGENT_MD = `---
 name: Foundry
 description: Implement changes using ONLY the local, offline Foundry code index (no built-in codebase/usages search).
-tools: ['foundry_semanticSearch', 'foundry_searchSymbol', 'foundry_traceCalls', 'foundry_showExecutionFlow', 'foundry_findUsages', 'foundry_findImplementations', 'foundry_architectureOverview', 'foundry_repoOverview', 'foundry_readFile', 'foundry_listDirectory', 'foundry_projectStandards', 'foundry_searchConfig', 'foundry_plan', 'edit', 'runCommands', 'runTasks', 'problems', 'changes']
+tools: ['foundry_semanticSearch', 'foundry_searchSymbol', 'foundry_traceCalls', 'foundry_showExecutionFlow', 'foundry_findUsages', 'foundry_findImplementations', 'foundry_architectureOverview', 'foundry_repoOverview', 'foundry_readFile', 'foundry_listDirectory', 'foundry_projectStandards', 'foundry_searchConfig', 'foundry_plan', 'edit', 'execute']
 ---
 
 You implement code changes in the user's current VS Code workspace using ONLY this

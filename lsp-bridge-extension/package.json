@@ -2,7 +2,7 @@
   "name": "swe-search-lsp-bridge",
   "displayName": "Local Semantic Search — LSP Bridge",
   "description": "Local, offline semantic code search with no LLM: a Search by meaning / Find similar UI plus an LSP symbol bridge for the semantic search MCP server. Local-only named pipe, no network access, no runtime dependencies beyond VS Code itself.",
-  "version": "0.9.19",
+  "version": "0.9.21",
   "publisher": "internal",
   "license": "MIT",
   "repository": {
@@ -88,6 +88,8 @@
       },
       {
         "name": "foundry_searchSymbol",
+        "toolReferenceName": "foundrySearchSymbol",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: symbol lookup",
         "modelDescription": "Look up a symbol by exact or partial name in this workspace (functions, classes, methods, and non-callable declarations like interfaces/enums/types). Use when you know the identifier name.",
         "icon": "$(symbol-method)",
@@ -114,6 +116,8 @@
       },
       {
         "name": "foundry_traceCalls",
+        "toolReferenceName": "foundryTraceCalls",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: trace calls",
         "modelDescription": "Show the direct callers and callees of a symbol (one level) from this workspace's call graph. Provide the file and definition line from a prior search result; include the symbol name for the offline fallback.",
         "icon": "$(references)",
@@ -145,6 +149,8 @@
       },
       {
         "name": "foundry_showExecutionFlow",
+        "toolReferenceName": "foundryExecutionFlow",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: execution flow",
         "modelDescription": "Walk the call graph several levels deep from a symbol in one call — downstream callees or upstream callers — returning an indented tree. Use to trace a whole flow (e.g. 'what does checkout eventually call').",
         "icon": "$(type-hierarchy)",
@@ -188,6 +194,8 @@
       },
       {
         "name": "foundry_findUsages",
+        "toolReferenceName": "foundryFindUsages",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: find usages",
         "modelDescription": "List every reference to a symbol across this workspace — use for 'where is X used?' and impact analysis before a change. Provide the file and definition line; include the symbol name for the offline fallback.",
         "icon": "$(references)",
@@ -219,6 +227,8 @@
       },
       {
         "name": "foundry_findImplementations",
+        "toolReferenceName": "foundryFindImplementations",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: find implementations",
         "modelDescription": "Find the concrete implementations of an interface or abstract member in this workspace. Provide the file and definition line; include the symbol name for the offline fallback.",
         "icon": "$(symbol-interface)",
@@ -250,6 +260,8 @@
       },
       {
         "name": "foundry_architectureOverview",
+        "toolReferenceName": "foundryArchitecture",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: architecture overview",
         "modelDescription": "Get a module-level architecture map of this workspace (modules = directories with their dependencies, dependents, entry points, and reference hotspots). Pass module to drill into one directory. Use to understand how the codebase is organized.",
         "icon": "$(project)",
@@ -269,6 +281,8 @@
       },
       {
         "name": "foundry_repoOverview",
+        "toolReferenceName": "foundryRepoOverview",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: index overview",
         "modelDescription": "Get a quick orientation summary of the indexed workspace: file/chunk counts, language breakdown, and which code-intelligence indexes (symbols, call graph, usages, implementations) are built.",
         "icon": "$(info)",
@@ -283,6 +297,8 @@
       },
       {
         "name": "foundry_readFile",
+        "toolReferenceName": "foundryReadFile",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: read file",
         "modelDescription": "Read a workspace file, two-pass to stay token-lean. Call with just `file` to get an OUTLINE first (the file's functions/classes/methods with line ranges, no bodies); then call again with `symbol=\"name\"` to read just that symbol's code, or `startLine`/`endLine` for a range. Small files return whole. Use to read the EXACT file/module located via search_symbol, architecture_overview, or a semantic_search hit — real source, not fuzzy snippets. Absolute or workspace-relative path.",
         "icon": "$(file-code)",
@@ -321,6 +337,8 @@
       },
       {
         "name": "foundry_listDirectory",
+        "toolReferenceName": "foundryListDirectory",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: directory structure",
         "modelDescription": "List the workspace directory STRUCTURE recursively — a file/folder tree that respects .gitignore/.sweignore (no node_modules/.git noise). Use to orient on an unfamiliar repo, see its layout, or find where files/dirs live (covers unindexed files too). Call with no path for the repo root; it is depth-limited, so drill into a branch by calling again with path=\"<subdir>\" and/or a larger depth. Folders cut off by the depth limit are marked \"/…\".",
         "icon": "$(list-tree)",
@@ -348,6 +366,8 @@
       },
       {
         "name": "foundry_projectStandards",
+        "toolReferenceName": "foundryProjectStandards",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: project standards",
         "modelDescription": "Report the project's detected standards: framework(s) (Drupal/Symfony/Laravel), the PSR-4 namespace→directory map, and the enforced coding standard — read from the ecosystem's own files (Composer's generated vendor artifacts, composer.json, Drupal *.info.yml, .foundry/standards.json), not guessed. Use on a PHP/Drupal repo to learn how namespaces map to folders (foundry_readFile also accepts a fully-qualified class name and resolves it). Deterministic, offline, no index.",
         "icon": "$(law)",
@@ -367,6 +387,8 @@
       },
       {
         "name": "foundry_searchConfig",
+        "toolReferenceName": "foundrySearchConfig",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: search config",
         "modelDescription": "Search the project's structured CONFIG (YAML) — Drupal config/sync views, fields, form/view displays, and *.services.yml / *.routing.yml / *.permissions.yml / *.info.yml, plus any other .yml. Config is NEVER embedded, so it is NOT in foundry_semanticSearch — this is how you reach it. Use for questions like 'which view lists published articles', 'what fields does the Article type have', 'what handles the /market/activity route', 'what does the market module depend on'. Returns items ranked exact-id > id/label > keyword, each with id, type, file:line and a facts summary (open the file with foundry_readFile for the raw YAML). Optionally filter by type (view, field, service, route, permission, module_info, …). Offline; needs the config index built.",
         "icon": "$(settings-gear)",
@@ -397,6 +419,8 @@
       },
       {
         "name": "foundry_plan",
+        "toolReferenceName": "foundryPlan",
+        "canBeReferencedInPrompt": true,
         "displayName": "Foundry: plan a change",
         "modelDescription": "Produce a grounded implementation plan for a described change using the local Foundry index. Returns a DETERMINISTIC context pack — index/architecture overview, the most relevant code with FULL bodies, the project's own docs, relevant structured config, call-sites/usages of the key symbols (downstream impact), and the real build/test manifests — followed by a plan template to fill in. Use this when you need to plan HOW to implement a change (scope, files to touch, steps, risks, verify commands) grounded in this workspace, e.g. after taking over a task in agent mode. It does not edit files or run commands. Offline; needs the local index built.",
         "icon": "$(checklist)",
