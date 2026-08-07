@@ -11,5 +11,7 @@ dist/
 *.log
 .DS_Store
 
-# Internal roadmap / working notes — kept local, not published
+# Internal roadmap / design / working notes — kept local, not published
 update.md
+execution.md
+execution-v2.md
