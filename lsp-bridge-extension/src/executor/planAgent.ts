@@ -20,6 +20,18 @@ const MAX_TOOL_RESULT_CHARS = 4000;
 // every subsequent round.
 const MAX_CODE_RESULT_CHARS = 8000;
 
+// Not every model follows "don't ask permission, just edit" as reliably as
+// others — some (observed: GPT-5 mini) plan correctly but then stop to ask
+// "should I apply this?" in plain text instead of calling an edit tool, even
+// after being told to proceed. Since the preamble alone doesn't guarantee
+// compliance, the LOOP enforces it: a round with no tool calls whose text
+// asks permission to act, before any edit has actually landed, gets a firm
+// "yes, proceed" nudge and another round — bounded, so a model that keeps
+// refusing regardless still ends the turn rather than looping forever.
+const MAX_PERMISSION_NUDGES = 2;
+const PERMISSION_ASK_RE =
+  /\b(should i|shall i|do you want me to|would you like me to|can i go ahead|ok(?:ay)? (?:for me )?to|you(?:'d| would) like me to)\b[^.?!\n]{0,60}\b(apply|implement|proceed|execute|go ahead|make (?:the|this) change|run (?:the|this))\b/i;
+
 const AGENT_PREAMBLE = [
   'You are @codebase, a coding assistant for the user’s CURRENT VS Code workspace. A local,',
   'offline code index is available through the foundry_* tools: foundry_semanticSearch,',
@@ -43,9 +55,11 @@ const AGENT_PREAMBLE = [
   '\n**Verify:** the exact test/build commands (from real conventions/manifests you found) and a manual check.',
   '\n• AN ACTUAL FIX/CHANGE ("fix X", "implement Y", "add Z", "refactor…")? Ground yourself via',
   'foundry_* tools, then make the change directly with the edit tools — work through everything',
-  'needed to completion in ONE continuous pass. Do not pause partway to ask permission once',
-  'you\'ve decided edits are wanted; there is no per-step approval — the user reviews everything',
-  'you changed at the end and can undo it all in one action, so proceed.',
+  'needed to completion in ONE continuous pass. NEVER stop to ask "should I apply this change?" /',
+  '"shall I proceed?" / "do you want me to implement this now?" — asking that question means you',
+  'already decided edits are wanted, so the answer is always yes; call the edit tool in THIS same',
+  'turn instead of asking. There is no per-step approval — the user reviews everything you changed',
+  'at the end (via a review UI) and can undo it all in one action, so proceed without pausing.',
   '\nIf genuinely unclear which of these three the user wants, ask ONE clarifying question rather',
   'than guessing.',
   '\n\nWHEN YOU DO EDIT: 1) Look up the REAL current code first — never edit from memory. A',
@@ -77,10 +91,12 @@ const AGENT_PREAMBLE = [
   'do the name lookups first, then semantic search for the pattern).',
   '\n• Wants the repo LAYOUT / directory structure / "where do files live"? →',
   'foundry_listDirectory (a recursive file/folder tree; drill with path="…").',
-  '\n• A PHP/Drupal repo, or a fully-qualified class name (has backslashes, e.g.',
-  '`Drupal\\market\\Entity\\Foo`)? → foundry_readFile accepts the FQCN directly (it',
-  'resolves to the file); call foundry_projectStandards to learn the framework and the',
-  'namespace→directory (PSR-4) map, or "what standard/framework does this project use".',
+  '\n• A namespaced/fully-qualified class name (has backslashes, e.g. `Acme\\Module\\Entity\\Foo`)?',
+  '→ foundry_readFile accepts the FQCN directly (it resolves to the file via the project\'s',
+  'AUTO-DETECTED standards — e.g. Composer PSR-4, plus any framework-specific reader like',
+  'Drupal\'s runtime module namespaces, when present — no config needed); call',
+  'foundry_projectStandards to learn what was detected, or "what standard/framework does this',
+  'project use".',
   '\n• Names a specific SYMBOL (function/class/type/constant)? → foundry_searchSymbol',
   '(an exact name lookup). Do NOT use semanticSearch to find something named exactly.',
   '\n• Names a specific MODULE, DIRECTORY, or FILE? → foundry_architectureOverview',
@@ -207,6 +223,8 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
   let endedMidTools = false;
   let sawUnbuiltIndex = false;
   let blockedReason: string | undefined;
+  let editToolCalled = false;
+  let permissionNudges = 0;
 
   // Token accounting — a CLIENT-SIDE ESTIMATE via the model's own tokenizer
   // (vscode.LanguageModelChat has no server-reported usage API). `cumulativeContext`
@@ -263,7 +281,35 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
     const blocked = /\[BLOCKED:?\s*([^\]]*)\]/i.exec(roundText);
     if (blocked) blockedReason = blocked[1].trim() || 'the agent could not proceed';
 
-    if (toolCalls.length === 0) break; // model produced its final answer
+    if (toolCalls.length === 0) {
+      // The model ended with plain text, no tool calls. Normally that's the
+      // final answer — UNLESS it's asking permission to do the very edit it
+      // was already told to do and hasn't; then override it instead of
+      // ending the turn (see MAX_PERMISSION_NUDGES doc comment above).
+      if (
+        !editToolCalled &&
+        service.changeCount === 0 &&
+        permissionNudges < MAX_PERMISSION_NUDGES &&
+        PERMISSION_ASK_RE.test(roundText)
+      ) {
+        permissionNudges++;
+        messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts));
+        messages.push(
+          vscode.LanguageModelChatMessage.User(
+            'Yes — proceed. You already have authorization to make this change; this run does not ' +
+              'pause for per-step approval. Call the edit tool(s) now instead of asking again.',
+          ),
+        );
+        const nudgeTokens =
+          (await countTokensSafe(model, messages[messages.length - 2], token)) +
+          (await countTokensSafe(model, messages[messages.length - 1], token));
+        tokensUsed += nudgeTokens;
+        cumulativeContext += nudgeTokens;
+        stream.markdown('\n\n_(proceeding automatically — this run doesn\'t pause for per-step approval)_\n');
+        continue;
+      }
+      break; // model produced its final answer
+    }
     endedMidTools = true;
 
     messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts));
@@ -285,6 +331,7 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
         } else {
           seenCalls.add(key);
           newCalls += 1;
+          editToolCalled = true;
           stream.progress(`✎ ${call.name} ${typeof input.path === 'string' ? input.path : ''}`);
           resultText = await runEditTool(call.name, input, service, workspaceRoot);
         }

@@ -41,8 +41,8 @@ export function registerReadFileTool(server: McpServer, workspaceRoot: string): 
         .string()
         .describe(
           'File to read — absolute or workspace-relative (e.g. "src/storage/store.ts"), ' +
-            'OR a fully-qualified class name (e.g. "Drupal\\market\\Entity\\Foo"), which is ' +
-            'resolved to its file via the language server / the project PSR-4 map.',
+            'OR a fully-qualified/namespaced class name (e.g. "Acme\\Module\\Entity\\Foo"), ' +
+            'which is resolved to its file via the language server / the project\'s detected PSR-4 map.',
         ),
       symbol: z
         .string()

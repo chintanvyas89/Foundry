@@ -186,16 +186,18 @@ identifies a named module/file). It's **two-pass to stay token-lean**: call it w
 just the file to get an *outline* (the file's functions/classes/methods with line
 ranges, no bodies), then again with `symbol="name"` to read just that symbol's code
 (or a `startLine`/`endLine` range); small files return whole. Absolute or relative
-path — **or a fully-qualified class name** like `Drupal\market\Entity\Foo`, resolved
-to its file via the language server / the project's PSR-4 map), **`list_directory`**
-(the workspace's recursive file/folder tree, respecting `.gitignore`/`.sweignore` —
-orient on the layout or find where files live, covering unindexed files too;
-depth-limited, drill in with `path="<subdir>"`), and **`project_standards`** (detected
-framework — Drupal/Symfony/Laravel — the PSR-4 namespace→directory map, and the
-enforced coding standard, read from the project's own files; see *Project standards*
-below), and **`search_config`** (keyword search over the project's structured **config**
-— Drupal `config/sync` views/fields/displays plus `*.services.yml` / `*.routing.yml` /
-`*.permissions.yml` / `*.info.yml` and any other `.yml` — parsed into facts; see
+path — **or a fully-qualified/namespaced class name** like `Acme\Module\Entity\Foo`,
+resolved to its file via the language server / the project's detected PSR-4 map),
+**`list_directory`** (the workspace's recursive file/folder tree, respecting
+`.gitignore`/`.sweignore` — orient on the layout or find where files live, covering
+unindexed files too; depth-limited, drill in with `path="<subdir>"`), and
+**`project_standards`** (auto-detected framework — e.g. Drupal/Symfony/Laravel —
+the PSR-4 namespace→directory map, and the enforced coding standard, read from the
+project's own files; see *Project standards* below), and **`search_config`**
+(keyword search over the project's structured **config** — generic by default, with
+richer facts when a framework pack matches, e.g. Drupal's `config/sync`
+views/fields/displays plus `*.services.yml` / `*.routing.yml` / `*.permissions.yml` /
+`*.info.yml` — and any other `.yml` regardless, parsed into facts; see
 *Config-aware search* below).
 The graph/reference tools take a result's `file`/`line`, so the agent can look up
 identifiers and follow execution flow / impact instead of reading files. The
@@ -421,10 +423,10 @@ by **reading the ecosystem's own artifacts rather than reinventing the rules**:
 Two ways it's used, both **offline and re-embed-free**:
 - **`project_standards`** tool / `@codebase` — reports the framework, PSR-4 map, and
   coding standard (also summarized in `repo_overview`).
-- **FQCN resolution** — `read_file` (and `@codebase`) accept a **fully-qualified class
-  name** (`Drupal\market\Entity\Foo`) and resolve it to its file — via the **language
-  server** when the LSP bridge is running (it already implements PSR-4), otherwise the
-  PSR-4 map above.
+- **FQCN resolution** — `read_file` (and `@codebase`) accept a **fully-qualified/
+  namespaced class name** (e.g. `Acme\Module\Entity\Foo`) and resolve it to its file —
+  via the **language server** when the LSP bridge is running (it already implements
+  PSR-4), otherwise the PSR-4 map above.
 
 **It's pluggable.** Detection is a registry of small "readers" under
 [`local-semantic-search-mcp/src/standards/readers/`](local-semantic-search-mcp/src/standards/readers/)

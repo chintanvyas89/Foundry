@@ -365,7 +365,7 @@
         "toolReferenceName": "foundryProjectStandards",
         "canBeReferencedInPrompt": true,
         "displayName": "Foundry: project standards",
-        "modelDescription": "Report the project's detected standards: framework(s) (Drupal/Symfony/Laravel), the PSR-4 namespace→directory map, and the enforced coding standard — read from the ecosystem's own files (Composer's generated vendor artifacts, composer.json, Drupal *.info.yml, .foundry/standards.json), not guessed. Use on a PHP/Drupal repo to learn how namespaces map to folders (foundry_readFile also accepts a fully-qualified class name and resolves it). Deterministic, offline, no index.",
+        "modelDescription": "Report the project's detected standards: framework(s) (auto-detected, e.g. Drupal/Symfony/Laravel), the PSR-4 namespace→directory map, and the enforced coding standard — read from the ecosystem's own files (Composer's generated vendor artifacts, composer.json, a framework-specific marker like Drupal's *.info.yml when present, .foundry/standards.json), not guessed. Use on a PHP/Composer repo to learn how namespaces map to folders (foundry_readFile also accepts a fully-qualified class name and resolves it). Deterministic, offline, no index.",
         "icon": "$(law)",
         "tags": [
           "foundry",
@@ -386,7 +386,7 @@
         "toolReferenceName": "foundrySearchConfig",
         "canBeReferencedInPrompt": true,
         "displayName": "Foundry: search config",
-        "modelDescription": "Search the project's structured CONFIG (YAML) — Drupal config/sync views, fields, form/view displays, and *.services.yml / *.routing.yml / *.permissions.yml / *.info.yml, plus any other .yml. Config is NEVER embedded, so it is NOT in foundry_semanticSearch — this is how you reach it. Use for questions like 'which view lists published articles', 'what fields does the Article type have', 'what handles the /market/activity route', 'what does the market module depend on'. Returns items ranked exact-id > id/label > keyword, each with id, type, file:line and a facts summary (open the file with foundry_readFile for the raw YAML). Optionally filter by type (view, field, service, route, permission, module_info, …). Offline; needs the config index built.",
+        "modelDescription": "Search the project's structured CONFIG (YAML), auto-detected and generic by default, with richer facts when a framework-specific pack matches (e.g. Drupal's config/sync views/fields/displays, *.services.yml / *.routing.yml / *.permissions.yml / *.info.yml) — plus any other .yml regardless. Config is NEVER embedded, so it is NOT in foundry_semanticSearch — this is how you reach it. Use for questions like 'which view lists published articles', 'what fields does the Article type have', 'what handles the /market/activity route', 'what does the market module depend on'. Returns items ranked exact-id > id/label > keyword, each with id, type, file:line and a facts summary (open the file with foundry_readFile for the raw YAML). Optionally filter by type (view, field, service, route, permission, module_info, …). Offline; needs the config index built.",
         "icon": "$(settings-gear)",
         "tags": [
           "foundry",

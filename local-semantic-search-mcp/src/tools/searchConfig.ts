@@ -4,11 +4,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { VectorStore } from '../storage/store.js';
 
 // Keyword lookup over the embedding-free config index — the config counterpart of
-// search_symbol. Structured YAML config (Drupal views/fields/services/routing/
-// permissions/info, and any other `.yml`) is NEVER embedded; this queries the
-// parsed facts by id/label/keyword, ranked exact-id > id/label substring > facts.
-// Purely local (no embedder, no bridge). Needs the config index to have been
-// built (SWE_BUILD_CONFIG / SWE_BUILD_ALL).
+// search_symbol. Structured YAML config is NEVER embedded — parsed generically for
+// any project by default, with richer facts when a framework-specific pack matches
+// (e.g. the built-in Drupal pack for views/fields/services/routing/permissions/info —
+// see config-index/packs/). This queries the parsed facts by id/label/keyword, ranked
+// exact-id > id/label substring > facts. Purely local (no embedder, no bridge). Needs
+// the config index to have been built (SWE_BUILD_CONFIG / SWE_BUILD_ALL).
 export function registerSearchConfigTool(
   server: McpServer,
   store: VectorStore,
@@ -16,9 +17,10 @@ export function registerSearchConfigTool(
 ): void {
   server.tool(
     'search_config',
-    'Search the project CONFIG index — structured YAML config (Drupal config/sync ' +
-      'views, fields, form/view displays, and *.services.yml / *.routing.yml / ' +
-      '*.permissions.yml / *.info.yml, plus any other .yml). Use for questions like ' +
+    'Search the project CONFIG index — structured YAML config, auto-detected and generic ' +
+      'by default, with richer facts when a framework-specific pack matches (e.g. Drupal\'s ' +
+      'config/sync views/fields/displays, *.services.yml / *.routing.yml / *.permissions.yml / ' +
+      '*.info.yml) — plus any other .yml regardless. Use for questions like ' +
       '"which view lists published articles", "what fields does the Article type have", ' +
       '"what handles the /market/activity route", "what does the market module depend ' +
       'on". Config is NOT in semantic_search (it is never embedded) — this is how you ' +

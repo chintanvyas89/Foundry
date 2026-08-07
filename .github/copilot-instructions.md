@@ -174,10 +174,12 @@ permissions, services, or a module's dependencies → `foundry_searchConfig` —
 config is **never embedded**, so it isn't in `semantic_search`; this is how you reach it,
 then `foundry_readFile` for the raw file. Then
 drill into the concrete hits (read the file, or `semantic_search` `expand=[…]`) rather
-than re-searching with reworded queries. On a **PHP/Drupal** repo, `foundry_readFile`
-accepts a **fully-qualified class name** (`Drupal\market\Entity\Foo`) and resolves it to
-the file; `foundry_projectStandards` reports the framework + PSR-4 namespace→directory
-map + coding standard. Need a plan for a change (scope, files to touch, steps, risks,
+than re-searching with reworded queries. On a **PHP/Composer** repo, `foundry_readFile`
+accepts a **fully-qualified class name** (e.g. `Acme\Module\Entity\Foo`) and resolves it
+to the file via the project's auto-detected standards (Composer PSR-4, plus a framework-
+specific reader like Drupal's runtime module namespaces when present); `foundry_projectStandards`
+reports the detected framework + PSR-4 namespace→directory map + coding standard. Need a
+plan for a change (scope, files to touch, steps, risks,
 verify commands) grounded in this workspace? → `foundry_plan` — it returns a deterministic
 context pack (overview, most-relevant code with full bodies, relevant config, call-sites,
 build/test manifests) plus a plan template; it does not edit files.

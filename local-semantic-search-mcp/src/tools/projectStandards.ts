@@ -4,18 +4,22 @@ import { detectStandards } from '../standards/registry.js';
 
 // Surfaces the project's detected standards — framework(s), the PSR-4 namespace↔path
 // map (with where each mapping came from), and the enforced coding standard — read
-// from the ecosystem's own artifacts (Composer's generated files, root composer.json,
-// Drupal *.info.yml, .foundry/standards.json). Deterministic, offline, no index.
+// from the ecosystem's own artifacts (Composer's generated files, root composer.json, a
+// framework-specific marker like Drupal's *.info.yml when present, .foundry/standards.json).
+// Framework detection and namespace mapping are generic (any PHP/Composer project);
+// Drupal gets an extra reader on top for its non-Composer runtime namespaces — see
+// standards/readers/. Deterministic, offline, no index.
 export function registerProjectStandardsTool(server: McpServer, workspaceRoot: string): void {
   server.tool(
     'project_standards',
-    'Report the project\'s detected standards: framework(s) (Drupal/Symfony/Laravel), ' +
-      'the PSR-4 namespace→directory map, and the enforced coding standard. Read from ' +
-      "the ecosystem's own files (Composer's generated vendor artifacts, composer.json, " +
-      'Drupal *.info.yml, and .foundry/standards.json) — not guessed. Use it on a PHP/' +
-      'Drupal repo to learn how namespaces map to folders (so you can turn a ' +
-      'fully-qualified class name into a file — foundry_readFile also accepts an FQCN) ' +
-      'and what conventions the project follows. Deterministic, offline, no index.',
+    'Report the project\'s detected standards: framework(s) (auto-detected, e.g. ' +
+      'Drupal/Symfony/Laravel), the PSR-4 namespace→directory map, and the enforced coding ' +
+      "standard. Read from the ecosystem's own files (Composer's generated vendor artifacts, " +
+      "composer.json, a framework-specific marker like Drupal's *.info.yml when present, and " +
+      '.foundry/standards.json) — not guessed. Use it on a PHP/Composer repo to learn how ' +
+      'namespaces map to folders (so you can turn a fully-qualified class name into a file — ' +
+      'foundry_readFile also accepts an FQCN) and what conventions the project follows. ' +
+      'Deterministic, offline, no index.',
     {
       namespaces: z
         .boolean()
