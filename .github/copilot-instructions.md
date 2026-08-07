@@ -180,16 +180,20 @@ call). `@codebase`/`@codebase /plan` answers end with two buttons: **▶ Impleme
 
 ## Executing a plan: `@codebase /implement`
 
-`@codebase /implement` is the in-house execution path (see `execution-v2.md`). It compiles
-the most recent plan into a deterministic **Workflow IR**, then hands it to the **Foundry
-Execution** view (Activity Bar → Semantic Search) — a native TreeView that runs the workflow
-step-by-step. For each step: **Open diff** shows VS Code's native side-by-side (current file
-vs. proposed content), then **Approve** applies it (via `vscode.workspace.applyEdit`) and
-advances, **Skip** skips, **Apply all** runs the rest, **Cancel** stops. When the run ends,
-**Keep** leaves the changes or **Undo all** reverts exactly the files the run touched (a
-file-level checkpoint). Chat stays for planning and steering — on a failed step, adjust in
-`@codebase` and re-run `/implement`. Reasoning lives only in the planner; the executors are
-deterministic, with a bounded orchestrator repair loop (P2) on validation failure. The
-**⚡ Continue in agent mode** button remains as a manual escape to VS Code's built-in agent
-(full native toolset). There is no longer a separate "Foundry" custom agent — the `foundry_*`
-tools / `#foundryCodebase` are available directly in normal agent mode.
+`@codebase /implement` runs the most recent (already-approved) plan as **one continuous LLM loop,
+entirely in the chat** (see `execution-v2.md`). It's a **brain + headless hands** design:
+- **Brain** — a single continuous LLM loop (the chat participant) with the `foundry_*` lookup tools
+  **plus a small edit tool set** (`apply_edit`/`create_file`/`delete_file`) and nothing else (no
+  built-in VS Code tools). It works through the whole plan in order, grounding every edit in the real
+  current code before changing it. The plan is **not** pre-chopped into steps — the model paces itself.
+- **Hands** — a headless `ExecutionService` that **validates + applies + checkpoints** each change
+  and returns `{ok, reason, diagnostics}`. The failure reason flows back to the brain, which
+  self-corrects (e.g. a stale `apply_edit` `find` → "no match" → re-read + retry).
+The brain streams its work and **pauses at the natural checkpoints it declares** (`[CHECKPOINT: …]`),
+showing the changed files with an **Open Diff** button (native diff editor) and — because the plan is
+already approved — a lightweight **Continue** / **Undo this checkpoint** / **Auto-continue to end**.
+When it finishes (`[DONE]`) the chat offers **Keep** / **Undo all**. If it can't proceed (`[BLOCKED: …]`)
+the run pauses with **Retry / Skip & continue** (partial edits are kept for inspection) / **Undo all**.
+All UI is in the chat — no separate view. **⚡ Continue in agent mode** remains as a manual escape.
+There is no separate "Foundry" custom agent — the `foundry_*` tools / `#foundryCodebase` work in normal
+agent mode too.

@@ -18,6 +18,17 @@ export class WorkspaceCheckpoint {
     return this.originals.size;
   }
 
+  // The captured pre-run bytes of a file: Uint8Array if it existed, null if it
+  // didn't, undefined if this file was never touched by the run. Used by the diff
+  // provider to show "before vs current" for a changed file.
+  getOriginal(fsPath: string): Uint8Array | null | undefined {
+    return this.originals.get(fsPath);
+  }
+
+  get files(): string[] {
+    return [...this.originals.keys()];
+  }
+
   // Record the pre-edit content of any not-yet-seen file. Call this immediately
   // before applying an edit that touches `files`.
   async capture(files: string[]): Promise<void> {

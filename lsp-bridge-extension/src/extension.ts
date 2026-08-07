@@ -11,8 +11,8 @@ import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
 import { registerLanguageModelTools } from './languageModelTools';
 import { registerChatParticipant } from './chatParticipant';
-import { setExecutionController } from './implement';
-import { ExecutionController } from './executionView';
+import { registerImplementCommands } from './implement';
+import { registerDiffProvider } from './executor/editTools';
 
 let server: net.Server | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
@@ -97,13 +97,12 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // In-house execution engine: the Foundry Execution view runs compiled workflows
-  // step-by-step (Approve/Skip/Apply-all + native-diff review + Keep/Undo).
-  const execOutput = vscode.window.createOutputChannel('Foundry Execution');
-  context.subscriptions.push(execOutput);
-  const executionController = new ExecutionController(execOutput);
-  executionController.register(context);
-  setExecutionController(executionController);
+  // In-house execution: `@codebase /implement` runs the plan step-by-step via the
+  // headless ExecutionService + per-step LLM brain, entirely in the chat. These
+  // register the Approve/Skip/Retry/Keep/Undo chat-button commands and the native
+  // "Open Diff" content provider.
+  registerImplementCommands(context);
+  registerDiffProvider(context);
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
   statusItem.text = '$(circle-outline) LSP Bridge: starting';

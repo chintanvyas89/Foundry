@@ -1,5 +1,18 @@
 # Workflow IR & Execution Engine — V2 (implementation spec)
 
+> **⚠️ Superseded (v0.12.1).** The deterministic "compile the plan into an exact-edit Workflow IR,
+> then apply blind" model below proved inaccurate (edits are written up front, without live lookup).
+> The shipping design is **chat-only, continuous-loop LLM execution**: the plan stays natural language
+> and is **not** pre-chopped into steps. The chat participant runs it as ONE continuous LLM loop,
+> constrained to `foundry_*` + a small edit tool set, grounding each edit in the real code and applying
+> it via a **headless `ExecutionService`** that validates + checkpoints and returns
+> `{ok, reason, diagnostics}` for the model to self-correct. The model **paces itself**, pausing at the
+> checkpoints it declares (`[CHECKPOINT]`/`[DONE]`/`[BLOCKED]`). Because the plan is already approved,
+> each pause is a lightweight **Continue** (plus **Auto-continue to end**); **Open Diff** on demand,
+> **Keep/Undo all** at the end, and pause-on-failure with **Retry/Skip**. See `src/executor/*` +
+> `src/implement.ts`. (v0.12.0 was a per-step variant with an `extractSteps` pass, since removed.)
+> The material below is kept for history.
+
 **Status:** guiding doc for implementation. Supersedes the strict-rule sections of
 `execution.md` ("planning happens exactly once", "execution performs zero reasoning"). The
 architecture and IR shape from v1 are kept; the rigid rules are loosened where reliability
