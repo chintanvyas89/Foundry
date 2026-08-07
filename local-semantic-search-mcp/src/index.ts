@@ -369,7 +369,13 @@ async function main() {
 
   registerReadFileTool(server, workspaceRoot);
 
-  registerListDirectoryTool(server, workspaceRoot, config.exclude);
+  // NOT config.exclude — that's the embed-index exclude list (e.g. "vendor/",
+  // "config/sync/**" to keep noise/YAML out of the SEARCH index), a different
+  // concern from "does this exist on disk." list_directory's whole point is to
+  // show the real layout including unindexed/excluded-from-embedding files
+  // (see its docstring); feeding it the embed excludes made excluded dirs
+  // report as "empty or entirely ignored" even when full of real files.
+  registerListDirectoryTool(server, workspaceRoot);
 
   registerProjectStandardsTool(server, workspaceRoot);
 

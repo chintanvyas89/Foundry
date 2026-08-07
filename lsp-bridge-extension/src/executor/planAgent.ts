@@ -55,11 +55,26 @@ const AGENT_PREAMBLE = [
   'server — you don\'t need its exact current text); insert_near_symbol to add code next to an',
   'existing symbol; rename_symbol for a TRUE rename that must update every reference;',
   'add_import/remove_import/move_file for the obvious cases; create_file/delete_file for new or',
-  'removed files. 3) On a "symbol not found"/"ambiguous" error, add container/index/signature and',
-  'retry — don\'t fall back to guessing text. On an apply_edit "not found" error, re-read the exact',
-  'current text and retry. 4) Implement ONLY what\'s actually being asked — no unrelated changes.',
-  '5) After editing, if diagnostics report errors you introduced, fix them before finishing.',
+  'removed files. 3) When SEVERAL edits target the SAME file, apply them ONE AT A TIME, not as a',
+  'batch of calls composed from a single earlier read: an earlier edit changes the surrounding',
+  'text, so a "find" string you worked out before it ran can silently stop matching once it\'s',
+  'applied. After an edit lands in a file you still have MORE edits for, treat your knowledge of',
+  'that file as stale for the next one — fold adjacent changes into a single apply_edit instead of',
+  'several when you can, and re-derive the next "find" from the tool\'s own diagnostics/feedback',
+  'rather than the pre-edit read. 4) On a "symbol not found"/"ambiguous" error, add',
+  'container/index/signature and retry — don\'t fall back to guessing text. On an apply_edit "not',
+  'found" error, re-read the exact current text and retry. 5) Implement ONLY what\'s actually being asked — no unrelated changes.',
+  '6) After editing, if diagnostics report errors you introduced, fix them before finishing.',
   '\n\nChoosing a LOOKUP tool (this matters — pick by what the user gave you):',
+  '\n• PRIORITY RULE: if the request names an exact identifier or machine name (snake_case,',
+  'dotted config id, or CamelCase — e.g. mercury_reference_card, field_hide_symbol,',
+  'getUserById), try foundry_searchSymbol and/or foundry_searchConfig for that exact name',
+  'FIRST — they are precise exact-match lookups, cheaper and more reliable than semantic',
+  'search. Only call foundry_semanticSearch once those come up empty, or for the parts of',
+  'the request that describe behaviour rather than name something exactly (a request often',
+  'mixes both — e.g. "add a Hide Date toggle for mercury_reference_card" is a named-symbol',
+  'lookup for the block PLUS a behavioural one for how the other toggles are implemented;',
+  'do the name lookups first, then semantic search for the pattern).',
   '\n• Wants the repo LAYOUT / directory structure / "where do files live"? →',
   'foundry_listDirectory (a recursive file/folder tree; drill with path="…").',
   '\n• A PHP/Drupal repo, or a fully-qualified class name (has backslashes, e.g.',
@@ -100,8 +115,10 @@ export interface AgentRunResult {
   refs: string[]; // absolute file paths surfaced by tool results, for stream.reference
   usedTools: string[]; // foundry_* tool names called, for the "Grounded via" trailer
   sawUnbuiltIndex: boolean;
-  tokensUsed: number; // ~tokens spent in THIS invocation (client-side estimate)
-  cumulativeTokens: number; // ~tokens spent across the whole run so far (incl. retries)
+  tokensUsed: number; // ~tokens spent in THIS invocation (client-side estimate); the
+  // caller (implement.ts) sums this across retries/skips for a true running total —
+  // resist adding a "cumulative" field here, since this loop has no visibility into
+  // prior invocations and can only report its own context SIZE, not tokens spent.
 }
 
 // Workspace custom-instruction files, in priority order. Built-in Copilot reads
@@ -221,7 +238,6 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
         usedTools: [],
         sawUnbuiltIndex: false,
         tokensUsed,
-        cumulativeTokens: cumulativeContext,
       };
     }
 
@@ -348,7 +364,6 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
     usedTools: [...usedTools],
     sawUnbuiltIndex,
     tokensUsed,
-    cumulativeTokens: cumulativeContext,
   };
 }
 

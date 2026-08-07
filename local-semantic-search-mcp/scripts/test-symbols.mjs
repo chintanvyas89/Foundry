@@ -68,6 +68,29 @@ assert(/Method/.test(methodText), 'callable hit is annotated with its kind from 
 const methodRes = method.structuredContent.results.filter((r) => r.symbol === 'searchSymbols');
 assert(methodRes.length === 1, 'callable present once (merged, not duplicated across sources)');
 
+// ---- search_symbol regex mode ---------------------------------------------
+const prefixHit = await handler({ regex: '^search' });
+const prefixResults = prefixHit.structuredContent.results;
+assert(prefixResults.length === 1 && prefixResults[0].symbol === 'searchSymbols', 'regex ^search matches only searchSymbols');
+
+const suffixHit = await handler({ regex: 'Node$' });
+assert(suffixHit.structuredContent.results[0]?.symbol === 'CallGraphNode', 'regex Node$ matches CallGraphNode');
+
+const caseHit = await handler({ regex: 'VECTORSTORE' });
+assert(caseHit.structuredContent.results[0]?.symbol === 'VectorStore', 'regex matching is case-insensitive');
+
+const noneHit = await handler({ regex: '^noSuchSymbol$' });
+assert(noneHit.structuredContent.results.length === 0 && /No symbol matching regex/.test(textOf(noneHit)), 'regex with no matches reports cleanly');
+
+const badRegex = await handler({ regex: '(unterminated' });
+assert(badRegex.structuredContent.results.length === 0 && /invalid regex/i.test(textOf(badRegex)), 'invalid regex pattern is a clean error, not a crash');
+
+const both = await handler({ name: 'VectorStore', regex: '^search' });
+assert(/only one/i.test(textOf(both)), 'passing both name and regex is rejected');
+
+const neither = await handler({});
+assert(/Pass either/i.test(textOf(neither)), 'passing neither name nor regex is rejected');
+
 store.close();
 rmSync(dbPath, { force: true });
 rmSync(`${dbPath}-wal`, { force: true });

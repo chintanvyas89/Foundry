@@ -171,7 +171,8 @@ absolute node path if VS Code can't find `node`). Then:
   workspace), both powered by the language server.
 
 For Copilot, the server exposes twelve MCP tools: **`semantic_search`** (by
-meaning), **`search_symbol`** (exact/partial name — callables *and* non-callable
+meaning), **`search_symbol`** (exact/partial name, or a `regex` for naming-
+convention queries like `^get.*Async$` — callables *and* non-callable
 declarations like interfaces/enums/types once the symbol table is built),
 **`trace_calls`** (call graph, one level), **`show_execution_flow`** (multi-level
 call-graph walk), **`find_usages`** (references), **`find_implementations`** (of an

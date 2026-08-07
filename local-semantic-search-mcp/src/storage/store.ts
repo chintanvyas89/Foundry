@@ -1019,27 +1019,55 @@ export class VectorStore {
         if (!results.has(key)) results.set(key, r);
       }
     };
-    const esc = q.replace(/[\\%_]/g, (m) => `\\${m}`);
+    const like = (term: string) => `%${term.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
     // 1) exact id (case-insensitive)
     add(
       this.db
         .prepare(`SELECT ${cols} FROM config WHERE id = ? COLLATE NOCASE${typeClause} LIMIT ?`)
         .all(q, ...typeArg, cap) as unknown as ConfigSearchRow[],
     );
-    // 2) id substring
+    // 2) id substring — the whole query as one phrase (unchanged fast path for a
+    // single term or an already-dotted id like "field.field.article.body").
     add(
       this.db
         .prepare(`SELECT ${cols} FROM config WHERE id LIKE ? ESCAPE '\\'${typeClause} LIMIT ?`)
-        .all(`%${esc}%`, ...typeArg, cap) as unknown as ConfigSearchRow[],
+        .all(like(q), ...typeArg, cap) as unknown as ConfigSearchRow[],
     );
-    // 3) label substring
+    // 3) label substring — same whole-phrase pass.
     add(
       this.db
         .prepare(
           `SELECT ${cols} FROM config WHERE label LIKE ? ESCAPE '\\'${typeClause} LIMIT ?`,
         )
-        .all(`%${esc}%`, ...typeArg, cap) as unknown as ConfigSearchRow[],
+        .all(like(q), ...typeArg, cap) as unknown as ConfigSearchRow[],
     );
+    // A multi-word natural-language query ("mercury_reference_card block content
+    // type fields") is almost never a literal substring of a config id/label, so
+    // the whole-phrase passes above find nothing for it even though one of its
+    // terms (the machine name) would. Fall back to per-token LIKE, longest term
+    // first, so a distinctive identifier lands its matches before a generic word
+    // like "block" can crowd out the cap. This is the LIKE-only counterpart of
+    // the FTS arm below's OR-of-tokens — needed because FTS5 isn't guaranteed to
+    // be compiled into every sqlite build (see ftsEnabled).
+    if (results.size < cap) {
+      const terms = [...new Set(extractQueryTokens(q))].sort((a, b) => b.length - a.length);
+      for (const term of terms) {
+        if (results.size >= cap) break;
+        add(
+          this.db
+            .prepare(`SELECT ${cols} FROM config WHERE id LIKE ? ESCAPE '\\'${typeClause} LIMIT ?`)
+            .all(like(term), ...typeArg, cap) as unknown as ConfigSearchRow[],
+        );
+      }
+      for (const term of terms) {
+        if (results.size >= cap) break;
+        add(
+          this.db
+            .prepare(`SELECT ${cols} FROM config WHERE label LIKE ? ESCAPE '\\'${typeClause} LIMIT ?`)
+            .all(like(term), ...typeArg, cap) as unknown as ConfigSearchRow[],
+        );
+      }
+    }
     // 4) facts/label keyword match via FTS5 (bm25-ranked), when available
     if (this.ftsEnabled && results.size < cap) {
       const match = toFtsMatch(q);

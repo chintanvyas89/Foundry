@@ -17,6 +17,7 @@ try {
   mk('src/tools');
   mk('modules/custom/market/src/Entity');
   mk('node_modules/foo');
+  mk('web/profiles/nasdaq/config/sync');
   wr('.gitignore', 'node_modules/\ndist/\n');
   wr('README.md');
   wr('src/index.ts');
@@ -25,6 +26,10 @@ try {
   wr('modules/custom/market/src/Entity/Activity.php');
   wr('node_modules/foo/index.js'); // must be ignored
   mk('dist'); wr('dist/out.js'); // ignored
+  // Real config YAML — NOT gitignored, but a project commonly keeps it out of
+  // the embed index via config.exclude (e.g. "config/sync/**"). list_directory
+  // must not inherit that: it's a different tool with a different job.
+  wr('web/profiles/nasdaq/config/sync/field.field.block_content.mercury_reference_card.field_hide_description.yml');
 
   let handler;
   registerListDirectoryTool({ tool: (_n, _d, _s, fn) => { handler = fn; } }, ws);
@@ -55,6 +60,15 @@ try {
   // absolute path resolves the same
   const subAbs = await handler({ path: join(ws, 'modules/custom/market') });
   assert(/Activity\.php/.test(textOf(subAbs)), 'absolute path scopes the same as relative');
+
+  // ---- NOT excluded via the embed index's config.exclude --------------------
+  // Regression: a real, non-gitignored dir (config/sync) must never come back
+  // "empty or entirely ignored" just because a project's config.exclude keeps
+  // it out of the SEARCH index — list_directory takes no exclude list at all.
+  const cfgSync = await handler({ path: 'web/profiles/nasdaq/config/sync' });
+  const cfgText = textOf(cfgSync);
+  assert(!/entirely ignored/.test(cfgText), 'config/sync is not reported as empty/ignored');
+  assert(/field_hide_description\.yml/.test(cfgText), 'config/sync lists its real YAML file');
 
   // ---- entry cap ------------------------------------------------------------
   const capped = await handler({ maxEntries: 2 });

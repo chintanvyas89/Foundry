@@ -28,7 +28,7 @@ interface RunState {
   workspaceRoot: string;
   requestPrompt: string; // for the agent-mode escape handoff
   answerText: string; // last answer/plan text, for the agent-mode escape handoff
-  cumulativeTokens: number;
+  cumulativeTokens: number; // running total of tokensUsed across retries/skips this run
   pendingAction?: PendingAction;
 }
 
@@ -126,7 +126,11 @@ async function runOnce(
     workspaceRoot: st.workspaceRoot,
     messages: st.messages,
   });
-  st.cumulativeTokens = result.cumulativeTokens;
+  // Accumulate — result.tokensUsed is the real cost of THIS invocation (it already
+  // compounds context-resend across every round); summing it across retries/skips
+  // gives a true running total. (result.cumulativeTokens is a different, smaller
+  // number — the final context SIZE, not tokens spent — not what belongs here.)
+  st.cumulativeTokens += result.tokensUsed;
   st.answerText = result.answerText;
 
   for (const f of result.refs) stream.reference(vscode.Uri.file(f));

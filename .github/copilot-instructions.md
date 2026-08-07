@@ -72,6 +72,11 @@ benefits from both without you calling search_symbol separately — and a
 multi-word query is no longer diluted by a common word one part of it happens
 to share with thousands of other chunks.
 
+For a naming-CONVENTION query you can't express as one fragment — "every
+`get*Async` method", "all `legacy_` handlers" — pass **`regex`** instead of
+`name` (exactly one of the two; matched case-insensitively against every
+indexed symbol name, e.g. `^get.*Async$`, `^legacy_`).
+
 ## Reading results efficiently
 
 `semantic_search` returns **compact signatures by default** — each hit is a

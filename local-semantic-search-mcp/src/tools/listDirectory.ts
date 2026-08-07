@@ -6,10 +6,13 @@ import { buildIgnoreMatcher } from '../ignore/ignoreMatcher.js';
 import { normalizeFileArg } from './pathArg.js';
 
 // Recursive directory structure of the workspace — a filesystem `tree`, respecting
-// the same ignore rules as indexing (.gitignore/.sweignore/defaults, so no
-// node_modules/.git noise). Complements read_file (one file) and
+// only .gitignore/.sweignore/defaults (so no node_modules/.git noise) —
+// DELIBERATELY NOT the embed index's config.exclude, which controls what's kept
+// out of the SEARCH index (e.g. "vendor/", "config/sync/**") and is a different
+// concern from "does this exist on disk". Complements read_file (one file) and
 // architecture_overview (index-level module map): this is the raw layout, works for
-// UNindexed files too, and answers "what's in this repo / where does X live".
+// UNindexed AND excluded-from-embedding files, and answers "what's in this repo /
+// where does X live".
 //
 // Depth-limited so it's token-lean and drill-friendly (like read_file's two pass):
 // a shallow tree first; the model calls again with path="<subdir>" (and/or a larger
@@ -25,11 +28,7 @@ interface TreeNode {
   more?: boolean; // a dir cut off by the depth limit that still has (non-ignored) children
 }
 
-export function registerListDirectoryTool(
-  server: McpServer,
-  workspaceRoot: string,
-  excludePatterns: string[] = [],
-): void {
+export function registerListDirectoryTool(server: McpServer, workspaceRoot: string): void {
   server.tool(
     'list_directory',
     'List the workspace directory STRUCTURE recursively — a file/folder tree that ' +
@@ -58,7 +57,12 @@ export function registerListDirectoryTool(
         .describe(`Cap on total entries returned (default ${DEFAULT_MAX_ENTRIES}).`),
     },
     async ({ path, depth, maxEntries }) => {
-      const ig = buildIgnoreMatcher(workspaceRoot, excludePatterns);
+      // Deliberately only .gitignore/.sweignore/defaults — NOT the embed-index's
+      // exclude list (config.exclude). That list controls what's kept out of the
+      // SEARCH index (e.g. "vendor/", "config/sync/**"); list_directory's whole
+      // point is to show the real on-disk layout including files excluded from
+      // embedding, so it must not inherit that config.
+      const ig = buildIgnoreMatcher(workspaceRoot);
       const { abs, rel } = normalizeFileArg(path && path.trim() ? path : '.', workspaceRoot);
 
       if (rel.startsWith('..')) {
