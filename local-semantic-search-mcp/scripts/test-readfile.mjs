@@ -77,6 +77,19 @@ try {
   assert(bigRes.structuredContent.mode === 'outline', 'a large file defaults to an outline, not a truncated dump');
   assert(bigRes.structuredContent.symbols.some((s) => s.name === 'a'), 'large-file outline lists its symbols');
 
+  // ---- structured config (.yml) never gets an outline / symbol prompt -------
+  const bigYaml = Array.from({ length: 500 }, (_, i) => `key${i}: value${i}`).join('\n');
+  writeFileSync(join(ws, 'big.yml'), bigYaml);
+  const yamlRes = await handler({ file: 'big.yml' });
+  const yamlText = textOf(yamlRes);
+  assert(yamlRes.structuredContent.mode === 'body', 'a large YAML file is never forced into outline mode');
+  assert(!/or a symbol to read further/.test(yamlText), 'YAML truncation note does not suggest a symbol read');
+  assert(/search_config/.test(yamlText), 'YAML truncation note points to search_config instead');
+
+  const yamlSym = await handler({ file: 'big.yml', symbol: 'key0' });
+  assert(/has no symbols/.test(textOf(yamlSym)) && /search_config/.test(textOf(yamlSym)),
+    'requesting a symbol on structured config explains why and points to search_config');
+
   // ---- safety / edge cases --------------------------------------------------
   assert(/outside the workspace/.test(textOf(await handler({ file: '../secrets' }))), 'refuses path traversal');
   assert(/looks binary/.test(textOf(await handler({ file: 'bin.dat' }))), 'skips binary files');

@@ -16,12 +16,20 @@ const MAX_TOOL_RESULT_CHARS = 6000;
 const EXECUTION_SYSTEM = [
   'You are Foundry’s execution agent. You implement an APPROVED plan in the user’s workspace,',
   'working through it in order in ONE continuous pass. Rules:',
-  '1) Before ANY edit, look up the real current code with the foundry_* tools — never edit from memory.',
-  '2) Change files ONLY with apply_edit / create_file / delete_file. apply_edit’s `find` must be the',
-  'EXACT current text and unique; if it errors, re-read the file and retry with corrected text.',
-  '3) Implement ONLY what the plan says — no unrelated changes.',
-  '4) After editing, if diagnostics report errors you introduced, fix them before moving on.',
-  '5) You have NO other tools (no terminal, no built-in search).',
+  '1) The plan below already identifies WHAT to change and roughly WHERE — TRUST IT. Go straight to a',
+  'TARGETED foundry_readFile(file, symbol="name") for the exact symbol you are about to touch (or',
+  'foundry_searchSymbol if you need its exact location). Do NOT re-run broad foundry_semanticSearch',
+  'discovery for something the plan already names — you have no memory of the planning conversation,',
+  'but the plan text IS its output; re-discovering what it already found wastes calls. Only fall back',
+  'to broader search when the plan is genuinely vague about where something lives.',
+  '2) A targeted symbol/line-range read is enough to edit safely — you do NOT need the whole file.',
+  'apply_edit’s `find` just needs to be the EXACT current text of the specific snippet you are',
+  'replacing, unique in the file.',
+  '3) Change files ONLY with apply_edit / create_file / delete_file. If `find` errors, re-read the',
+  'exact symbol/lines (something may have shifted) and retry with corrected text.',
+  '4) Implement ONLY what the plan says — no unrelated changes.',
+  '5) After editing, if diagnostics report errors you introduced, fix them before moving on.',
+  '6) You have NO other tools (no terminal, no built-in search).',
   'PACING: after completing each logical unit of the plan, STOP and end your turn with',
   '"[CHECKPOINT: <one-line summary of what you just did>]" so the user can review — do NOT keep going',
   'past a checkpoint in the same turn. When the ENTIRE plan is implemented, end with "[DONE]".',
@@ -35,6 +43,8 @@ export interface PlanRunResult {
   summary?: string; // checkpoint summary (what was just done)
   reason?: string; // blocked reason
   changedFiles: string[]; // absolute paths changed during this segment
+  segmentTokens: number; // ~tokens spent in this segment (all rounds) — client-side estimate
+  cumulativeTokens: number; // ~tokens spent in the whole run so far (all segments)
 }
 
 export function seedMessages(planText: string, originalRequest: string): vscode.LanguageModelChatMessage[] {
@@ -65,18 +75,41 @@ export async function runPlanAgent(ctx: PlanAgentContext): Promise<PlanRunResult
     .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
   const tools: vscode.LanguageModelChatTool[] = [...foundryTools, ...EDIT_TOOLS];
 
+  // Token accounting — a CLIENT-SIDE ESTIMATE via the model's own tokenizer
+  // (vscode.LanguageModelChat has no server-reported usage API, so this is a
+  // proxy, not exact billing). `cumulativeContext` tracks the running size of
+  // `messages` as it grows; each round's input cost is a SNAPSHOT of that
+  // total (what actually gets re-sent that round), so this reflects the real
+  // repeated-resend cost without re-tokenizing the whole history every round.
+  let cumulativeContext = 0;
+  for (const m of messages) cumulativeContext += await countTokensSafe(request.model, m, token);
+  let segmentTokens = 0;
+
   let finalText = ''; // all assistant text this segment — scanned for control markers
   let tailText = ''; // text from the final (no-tool-call) round — the closing turn
   for (let round = 0; round < MAX_ROUNDS; round++) {
     if (token.isCancellationRequested) {
-      return { status: 'blocked', reason: 'cancelled', changedFiles: [...service.currentSegmentFiles] };
+      return {
+        status: 'blocked',
+        reason: 'cancelled',
+        changedFiles: [...service.currentSegmentFiles],
+        segmentTokens,
+        cumulativeTokens: cumulativeContext,
+      };
     }
+    segmentTokens += cumulativeContext; // this round re-sends everything accumulated so far
 
     let response: vscode.LanguageModelChatResponse;
     try {
       response = await request.model.sendRequest(messages, { tools }, token);
     } catch (err) {
-      return { status: 'blocked', reason: `model request failed: ${String(err)}`, changedFiles: [...service.currentSegmentFiles] };
+      return {
+        status: 'blocked',
+        reason: `model request failed: ${String(err)}`,
+        changedFiles: [...service.currentSegmentFiles],
+        segmentTokens,
+        cumulativeTokens: cumulativeContext,
+      };
     }
 
     const toolCalls: vscode.LanguageModelToolCallPart[] = [];
@@ -96,14 +129,26 @@ export async function runPlanAgent(ctx: PlanAgentContext): Promise<PlanRunResult
 
     if (toolCalls.length === 0) {
       tailText = roundText; // the model ended its turn (marker lives here)
+      const outTokens = await countTokensSafe(request.model, roundText, token);
+      segmentTokens += outTokens;
+      cumulativeContext += outTokens;
       break;
     }
     messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts));
+    const asstTokens = await countTokensSafe(request.model, messages[messages.length - 1], token);
+    segmentTokens += asstTokens;
+    cumulativeContext += asstTokens;
 
     const resultParts: vscode.LanguageModelToolResultPart[] = [];
     for (const call of toolCalls) {
       if (token.isCancellationRequested) {
-        return { status: 'blocked', reason: 'cancelled', changedFiles: [...service.currentSegmentFiles] };
+        return {
+          status: 'blocked',
+          reason: 'cancelled',
+          changedFiles: [...service.currentSegmentFiles],
+          segmentTokens,
+          cumulativeTokens: cumulativeContext,
+        };
       }
       let resultText: string;
       const input = (call.input ?? {}) as Record<string, unknown>;
@@ -130,19 +175,35 @@ export async function runPlanAgent(ctx: PlanAgentContext): Promise<PlanRunResult
       );
     }
     messages.push(vscode.LanguageModelChatMessage.User(resultParts));
+    const toolTokens = await countTokensSafe(request.model, messages[messages.length - 1], token);
+    segmentTokens += toolTokens;
+    cumulativeContext += toolTokens;
   }
 
   // Record the closing assistant turn (only the final round's text — earlier rounds
   // were already pushed with their tool calls, so this avoids duplicating them).
   if (tailText.trim()) messages.push(vscode.LanguageModelChatMessage.Assistant(tailText));
 
-  return classify(finalText, [...service.currentSegmentFiles]);
+  const result = classify(finalText, [...service.currentSegmentFiles]);
+  return { ...result, segmentTokens, cumulativeTokens: cumulativeContext };
+}
+
+async function countTokensSafe(
+  model: vscode.LanguageModelChat,
+  input: string | vscode.LanguageModelChatMessage,
+  token: vscode.CancellationToken,
+): Promise<number> {
+  try {
+    return await model.countTokens(input, token);
+  } catch {
+    return 0; // best-effort — a counting hiccup must never break execution
+  }
 }
 
 // Classify a finished segment from its control marker (last marker wins). No marker
 // means the turn ended (or hit the round budget) without a verdict → treat as a
 // checkpoint so the run pauses for the user rather than silently stopping.
-function classify(finalText: string, changedFiles: string[]): PlanRunResult {
+function classify(finalText: string, changedFiles: string[]): Omit<PlanRunResult, 'segmentTokens' | 'cumulativeTokens'> {
   const markers = findMarkers(finalText);
   const last = markers[markers.length - 1];
   if (last?.kind === 'blocked') {

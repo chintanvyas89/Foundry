@@ -120,8 +120,10 @@ export const ORIGINAL_SCHEME = 'foundry-original';
 class OriginalContentProvider implements vscode.TextDocumentContentProvider {
   service?: ExecutionService;
   provideTextDocumentContent(uri: vscode.Uri): string {
-    const absPath = decodeURIComponent(uri.path.replace(/^\//, ''));
-    const bytes = this.service?.originalOf(absPath);
+    // `uri` is a real file:// URI with just the scheme swapped (see
+    // openChangeDiff below), so `.fsPath` reverses it exactly — no manual
+    // percent-encode/decode round-trip to get subtly wrong on odd paths.
+    const bytes = this.service?.originalOf(uri.fsPath);
     return bytes == null ? '' : Buffer.from(bytes).toString('utf8');
   }
 }
@@ -138,7 +140,12 @@ export function registerDiffProvider(context: vscode.ExtensionContext): void {
 export async function openChangeDiff(service: ExecutionService, absPath: string): Promise<void> {
   originalProvider.service = service;
   const rel = vscode.workspace.asRelativePath(absPath);
-  const left = vscode.Uri.parse(`${ORIGINAL_SCHEME}:/${encodeURIComponent(absPath)}`);
+  // Build the virtual-scheme URI by swapping the scheme on a REAL file URI
+  // (not by hand-building/parsing a URI string) — this guarantees well-formed
+  // path/authority encoding for every path shape (spaces, unicode, Windows
+  // drive letters, ...), which a manual encodeURIComponent + Uri.parse
+  // round-trip is easy to get subtly wrong on.
+  const left = vscode.Uri.file(absPath).with({ scheme: ORIGINAL_SCHEME });
   const right = vscode.Uri.file(absPath);
   await vscode.commands.executeCommand('vscode.diff', left, right, `Foundry · ${rel} (before → after)`, {
     preview: true,

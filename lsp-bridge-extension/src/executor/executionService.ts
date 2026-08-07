@@ -188,9 +188,20 @@ export class ExecutionService {
     const applied = await vscode.workspace.applyEdit(edit);
     if (!applied) return { ok: false, reason: `VS Code rejected the edit to ${relForMsg}` };
     this.changed.add(absPath);
+    // Formatting and saving are two separate risks — a formatter throwing (no
+    // formatter registered, a formatter error, etc.) must NEVER prevent the save.
+    // Previously both were in one try/catch: if formatDocument() threw, doc.save()
+    // never ran, silently leaving the edit unsaved (dirty) in the editor. Undo/
+    // checkpoint restore then writes the ORIGINAL bytes straight to disk, but a
+    // still-dirty open editor doesn't reliably pick that up — from the outside
+    // this looked exactly like "Undo all" missing some files.
     try {
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
-      await formatDocument(doc);
+      try {
+        await formatDocument(doc);
+      } catch {
+        /* formatting is best-effort — never block saving the actual edit */
+      }
       if (doc.isDirty) await doc.save();
     } catch {
       /* file may have been deleted/moved — ignore */

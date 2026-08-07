@@ -22,6 +22,7 @@ interface RunState {
   planText: string;
   autoContinue: boolean;
   pendingAction?: PendingAction;
+  totalTokens: number; // running ~token estimate across the whole run (see planAgent.ts)
 }
 
 let run: RunState | undefined;
@@ -52,8 +53,17 @@ export function registerImplementCommands(context: vscode.ExtensionContext): voi
       }
       run = undefined;
     }),
-    vscode.commands.registerCommand('foundry.impl.openDiff', async (absPath?: string) => {
-      if (run && absPath) await openChangeDiff(run.service, absPath);
+    vscode.commands.registerCommand('foundry.impl.openDiff', async (files?: string[]) => {
+      if (!run || !files || files.length === 0) return;
+      if (files.length === 1) {
+        await openChangeDiff(run.service, files[0]);
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(
+        files.map((f) => ({ label: vscode.workspace.asRelativePath(f), description: f, absPath: f })),
+        { placeHolder: 'Select a changed file to view its diff' },
+      );
+      if (picked) await openChangeDiff(run.service, picked.absPath);
     }),
   );
 }
@@ -96,6 +106,7 @@ export async function runImplement(
     originalRequest,
     planText,
     autoContinue: false,
+    totalTokens: 0,
   };
   stream.markdown('### Implementing the plan\n\nI’ll work through it and pause at checkpoints for your review.\n');
   pushUser(run, 'Begin implementing the plan now. Work through it in order, and pause at the first natural checkpoint.');
@@ -157,6 +168,8 @@ async function runSegment(
     messages: st.messages,
   });
 
+  st.totalTokens = result.cumulativeTokens; // cumulative already includes every prior segment
+
   if (token.isCancellationRequested) {
     st.service.commitSegment();
     stream.markdown('\n\n⏹ **Cancelled.**\n');
@@ -165,6 +178,7 @@ async function runSegment(
   }
 
   renderChangedFiles(stream, result.changedFiles);
+  renderTokenUsage(stream, result.segmentTokens, st.totalTokens);
 
   if (result.status === 'blocked') {
     output.appendLine(`[implement] blocked: ${result.reason}`);
@@ -196,6 +210,17 @@ function finishRun(stream: vscode.ChatResponseStream): void {
   renderKeepUndo(stream);
 }
 
+// Client-side ~token estimate (see planAgent.ts) — not exact billed usage, since
+// VS Code's stable chat API reports no server-side usage figure; a proxy via the
+// model's own tokenizer is the best available signal.
+function renderTokenUsage(stream: vscode.ChatResponseStream, segmentTokens: number, totalTokens: number): void {
+  stream.markdown(`\n_~${fmtTokens(segmentTokens)} tokens this step · ~${fmtTokens(totalTokens)} total this run._\n`);
+}
+
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
 // Offer Keep / Undo-all if the run touched anything; otherwise clear the run.
 function renderKeepUndo(stream: vscode.ChatResponseStream): void {
   const st = run;
@@ -212,13 +237,16 @@ function renderKeepUndo(stream: vscode.ChatResponseStream): void {
   stream.button({ command: 'foundry.impl.undoAll', title: '↩ Undo all changes' });
 }
 
+// One "Open Diff" button per step, not one per file — clicking it opens the
+// file directly if there's only one, or a quickpick to choose among several
+// (see the foundry.impl.openDiff command). The explicit file list is passed
+// as the button's argument (not read from the service at click-time) so it
+// still opens the RIGHT files even after the run has moved past this step.
 function renderChangedFiles(stream: vscode.ChatResponseStream, files: string[]): void {
   if (files.length === 0) return;
   stream.markdown(`\n\n**${files.length} file${files.length === 1 ? '' : 's'} changed:**\n`);
-  for (const f of files) {
-    stream.anchor(vscode.Uri.file(f));
-    stream.button({ command: 'foundry.impl.openDiff', title: 'Open Diff', arguments: [f] });
-  }
+  for (const f of files) stream.anchor(vscode.Uri.file(f));
+  stream.button({ command: 'foundry.impl.openDiff', title: '🔍 Open Diff', arguments: [files] });
 }
 
 function renderCheckpointButtons(stream: vscode.ChatResponseStream): void {
