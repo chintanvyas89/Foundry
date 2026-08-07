@@ -6,14 +6,21 @@ import { detectStandards } from '../standards/registry.js';
 // `<workspace>/.foundry/config.json`:
 //   {
 //     "configExtensions": [".yml", ".yaml", ".json"],   // which files are "config"
-//     "configReaders": ["drupal"]                        // which type-specific packs
+//     "configReaders": ["drupal"],                       // which type-specific packs
+//     "vocabulary": { "content type": ["NodeType", "node_type"] }  // query vocabulary
 //   }
-// Both optional. `configExtensions` defaults to YAML; when omitted, `configReaders`
+// All optional. `configExtensions` defaults to YAML; when omitted, `configReaders`
 // is AUTO-derived from the detected framework(s) — so Drupal projects get the
 // Drupal pack with zero config, while the generic core covers everyone else.
+// `vocabulary` is a manual override for semantic_search's query planner (see
+// vocab/index.ts) — a query phrase (lowercase, matched as a substring) maps to
+// canonical identifiers/synonyms to also search for. Works for any project,
+// any domain; the planner's automatic derivation (from this project's own
+// config index + symbol table) usually makes this unnecessary.
 export interface FoundryConfigFile {
   configExtensions?: string[];
   configReaders?: string[];
+  vocabulary?: Record<string, string[]>;
 }
 
 // Generic-first: only YAML is treated as config out of the box. A project opts
@@ -50,6 +57,15 @@ export function resolveConfigExtensions(workspaceRoot: string): Set<string> {
   const cfg = loadFoundryConfig(workspaceRoot);
   const declared = (cfg?.configExtensions ?? []).map(normExt).filter(Boolean);
   return new Set(declared.length ? declared : DEFAULT_CONFIG_EXTENSIONS);
+}
+
+// The explicit query-vocabulary map declared in `.foundry/config.json`, or {}
+// if none/absent/malformed. Keys are matched as lowercase substrings of a
+// query by the planner's vocab resolution (vocab/index.ts); this is just the
+// raw declared map — merging with auto-derived vocabulary happens there.
+export function resolveVocabulary(workspaceRoot: string): Record<string, string[]> {
+  const cfg = loadFoundryConfig(workspaceRoot);
+  return cfg?.vocabulary ?? {};
 }
 
 // The type-specific reader packs enabled for THIS project — explicit list if the

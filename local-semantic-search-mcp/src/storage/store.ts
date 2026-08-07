@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { IndexedChunk, SearchResult } from '../types.js';
 import { cosineSimilarity } from './similarity.js';
+import { FTS_VERSION, ftsAugment, toFtsMatch, extractQueryTokens, ftsQuote } from './ftsText.js';
+import { planQuery, type QueryPlan } from './queryPlan.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS chunks (
@@ -496,31 +498,28 @@ export class VectorStore {
     return cChunks;
   }
 
+  // Brute-force cosine over every chunk, but only pulls `id, embedding` for the
+  // scoring pass — not the full row (file/symbol/text/contentHash) — since most
+  // rows are discarded. The final topK's full rows are then hydrated in one
+  // batch via getChunksByIds. Same output shape as before, less per-query I/O.
   search(queryEmbedding: Float32Array, topK: number): SearchResult[] {
-    const rows = this.db.prepare('SELECT * FROM chunks').all() as Array<{
+    const rows = this.db.prepare('SELECT id, embedding FROM chunks').all() as Array<{
       id: string;
-      file: string;
-      symbol: string | null;
-      startLine: number;
-      endLine: number;
-      text: string;
-      contentHash: string;
       embedding: Uint8Array;
     }>;
 
-    const scored: SearchResult[] = rows.map((row) => ({
-      id: row.id,
-      file: row.file,
-      symbol: row.symbol ?? undefined,
-      startLine: row.startLine,
-      endLine: row.endLine,
-      text: row.text,
-      contentHash: row.contentHash,
-      score: cosineSimilarity(queryEmbedding, blobToVector(row.embedding)),
-    }));
+    const scored = rows
+      .map((row) => ({ id: row.id, score: cosineSimilarity(queryEmbedding, blobToVector(row.embedding)) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
 
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, topK);
+    const rowById = new Map(this.getChunksByIds(scored.map((s) => s.id)).map((r) => [r.id, r]));
+    const out: SearchResult[] = [];
+    for (const s of scored) {
+      const row = rowById.get(s.id);
+      if (row) out.push({ ...row, score: s.score });
+    }
+    return out;
   }
 
   // Lexical (keyword) search over the FTS5 index, ranked by bm25 (best first).
@@ -529,9 +528,17 @@ export class VectorStore {
   // The `score` field carries the raw bm25 value (lower = better); callers that
   // fuse with vector results use the RANK, not this magnitude.
   searchText(queryText: string, cap = 50): SearchResult[] {
-    if (!this.ftsEnabled) return [];
     const match = toFtsMatch(queryText);
-    if (!match) return [];
+    return match ? this.searchTextRaw(match, cap) : [];
+  }
+
+  // Same as searchText, but takes an ALREADY-BUILT FTS5 MATCH expression —
+  // used by searchHybrid for the tiered (compound / NEAR / OR) queries the
+  // query planner builds, which aren't free text and shouldn't be re-parsed by
+  // toFtsMatch. A malformed expression degrades to no lexical results, same
+  // safety contract as searchText.
+  searchTextRaw(match: string, cap = 50): SearchResult[] {
+    if (!this.ftsEnabled) return [];
     let rows: Array<{
       id: string;
       file: string;
@@ -570,38 +577,127 @@ export class VectorStore {
     }));
   }
 
-  // Hybrid retrieval: semantic ranking (cosine) with a BOUNDED lexical bonus.
+  // How many chunks contain this bare token, lexically (via FTS). Used by the
+  // query planner to classify a token as "ubiquitous" (e.g. `block` used
+  // thousands of times) vs rare. Cached per process — doc frequency only
+  // changes on reindex, and a store is rebuilt fresh per index build.
+  private docFreqCache = new Map<string, number>();
+  docFrequency(token: string): number {
+    if (!this.ftsEnabled) return 0;
+    const key = token.toLowerCase();
+    const cached = this.docFreqCache.get(key);
+    if (cached !== undefined) return cached;
+    let count = 0;
+    try {
+      const row = this.db
+        .prepare('SELECT COUNT(*) AS c FROM chunks_fts WHERE chunks_fts MATCH ?')
+        .get(ftsQuote(key)) as { c: number };
+      count = row.c;
+    } catch {
+      count = 0;
+    }
+    this.docFreqCache.set(key, count);
+    return count;
+  }
+
+  totalChunkCount(): number {
+    return (this.db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c;
+  }
+
+  // Stored embeddings for the given ids, keyed by id (unlike getEmbeddingsByIds,
+  // which discards which vector belongs to which id — fine for blending pinned
+  // vectors together, but not for scoring individual injected search hits).
+  getEmbeddingMapByIds(ids: string[]): Map<string, Float32Array> {
+    const map = new Map<string, Float32Array>();
+    if (ids.length === 0) return map;
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(`SELECT id, embedding FROM chunks WHERE id IN (${placeholders})`)
+      .all(...ids) as Array<{ id: string; embedding: Uint8Array }>;
+    for (const row of rows) map.set(row.id, blobToVector(row.embedding));
+    return map;
+  }
+
+  // Hybrid retrieval: semantic ranking (cosine), sharpened by a TIERED lexical
+  // signal built by the query planner (queryPlan.ts) — see its module doc for
+  // why three tiers instead of one OR-of-everything MATCH.
   //
-  // We deliberately don't use rank-fusion (RRF) here. RRF lets a strong lexical
-  // hit dethrone a strong semantic #1, which regresses natural-language queries
-  // — made worse by FTS5's word tokenizer, which indexes `cosineSimilarity` as
-  // one token but matches the two-word phrase "cosine similarity" only in prose
-  // (docs/comments), not the actual identifier. So a NL query would surface docs
-  // over code.
+  // We deliberately don't use plain rank-fusion (RRF) here. RRF lets ANY
+  // lexical hit dethrone a strong semantic #1, which regresses natural-language
+  // queries. Instead:
+  //   - Tier 3 (recall floor, today's original behavior): a small additive
+  //     bonus, decaying by FTS rank, capped at LEX_BONUS — applied ONLY to
+  //     hits already in the vector pool. Bounded, so a clearly stronger
+  //     semantic hit can never be overtaken by a generic keyword match.
+  //   - Tiers 1/2 (compound identifier / NEAR proximity): high-precision
+  //     enough that they MAY be injected even when the vector arm's
+  //     mean-pooled query embedding ranked them outside the pool — which is
+  //     exactly the dilution a query like "xyz block" suffers (the ubiquitous
+  //     word "block" drags the pooled vector away from the rare `xyzBlock`
+  //     hit). Injected hits are scored by their REAL cosine to `direction`
+  //     (fetched from their stored embedding, never synthesized) plus a
+  //     bounded bonus — so a coincidental token match still can't outrank a
+  //     genuinely irrelevant chunk's low semantic score. This does not
+  //     reintroduce the old regression: that came from injecting BARE
+  //     single-token lexical-only hits (any keyword match, unbounded
+  //     candidate set); here only compound/proximity/vocab hits — a much
+  //     narrower, higher-precision set — can be injected. A plain NL query
+  //     rarely forms a real compound or proximity cluster, so injection
+  //     stays quiet for it (see queryPlan.ts's module doc for why).
   //
-  // Instead each result's cosine score gets a small additive bonus (decaying
-  // with FTS rank, capped at LEX_BONUS). Because the bonus is bounded, a clearly
-  // stronger semantic hit can never be overtaken; lexical evidence only decides
-  // among results whose semantic scores are already close — which is exactly
-  // when we want it to. This can't regress a query that pure vector got right;
-  // it only promotes exact-token matches within the semantic candidate pool.
-  //
-  // Returns `score` = cosine + bonus so display order matches the number shown.
-  // Degrades to pure vector search when FTS is unavailable. Note: it reorders /
-  // promotes within the vector candidate pool but doesn't inject lexical-only
-  // hits the vector arm missed entirely — a blind promotion of those (unknown
-  // true relevance) is what caused the regressions we're avoiding.
-  searchHybrid(direction: Float32Array, queryText: string, topK: number): SearchResult[] {
-    const LEX_BONUS = 0.1; // max additive bump for the top lexical hit
+  // Degrades to pure vector search when FTS is unavailable.
+  searchHybrid(direction: Float32Array, queryText: string, topK: number, plan?: QueryPlan): SearchResult[] {
     const pool = this.search(direction, Math.max(topK * 8, 64));
+    if (!this.ftsEnabled) return pool.slice(0, topK);
 
-    const fts = this.searchText(queryText, Math.max(topK * 4, 50));
-    const bonusById = new Map<string, number>();
-    // Decay by rank so the strongest lexical hits get the most help: rank 0 ->
-    // LEX_BONUS, rank 1 -> LEX_BONUS/2, ...
-    fts.forEach((r, i) => bonusById.set(r.id, LEX_BONUS / (1 + i)));
+    const LEX_BONUS = 0.1; // tier 3 — within-pool only, unchanged from before
+    const TIER2_BONUS = 0.12; // NEAR proximity — may inject
+    const TIER1_BONUS = 0.18; // compound identifier / vocab exact phrase — may inject
 
-    const fused = pool.map((r) => ({ ...r, score: r.score + (bonusById.get(r.id) ?? 0) }));
+    const resolvedPlan =
+      plan ??
+      planQuery(queryText, {
+        docFrequency: (t) => this.docFrequency(t),
+        totalChunks: this.totalChunkCount(),
+      });
+
+    const resultById = new Map<string, SearchResult>(pool.map((r) => [r.id, r]));
+
+    if (resolvedPlan.matchTier3) {
+      const tier3 = this.searchTextRaw(resolvedPlan.matchTier3, Math.max(topK * 4, 50));
+      tier3.forEach((hit, i) => {
+        const existing = resultById.get(hit.id);
+        if (existing) resultById.set(hit.id, { ...existing, score: existing.score + LEX_BONUS / (1 + i) });
+      });
+    }
+
+    const preciseHits: Array<{ hit: SearchResult; bonus: number }> = [];
+    if (resolvedPlan.matchTier2) {
+      this.searchTextRaw(resolvedPlan.matchTier2, 20).forEach((hit, i) =>
+        preciseHits.push({ hit, bonus: TIER2_BONUS / (1 + i) }),
+      );
+    }
+    if (resolvedPlan.matchTier1) {
+      this.searchTextRaw(resolvedPlan.matchTier1, 20).forEach((hit, i) =>
+        preciseHits.push({ hit, bonus: TIER1_BONUS / (1 + i) }),
+      );
+    }
+    if (preciseHits.length > 0) {
+      const missingIds = [...new Set(preciseHits.map((p) => p.hit.id).filter((id) => !resultById.has(id)))];
+      const embeddings = missingIds.length > 0 ? this.getEmbeddingMapByIds(missingIds) : new Map<string, Float32Array>();
+      for (const { hit, bonus } of preciseHits) {
+        const existing = resultById.get(hit.id);
+        if (existing) {
+          resultById.set(hit.id, { ...existing, score: existing.score + bonus });
+          continue;
+        }
+        const emb = embeddings.get(hit.id);
+        if (!emb) continue; // defensive — chunk vanished mid-query
+        resultById.set(hit.id, { ...hit, score: cosineSimilarity(direction, emb) + bonus });
+      }
+    }
+
+    const fused = [...resultById.values()];
     fused.sort((a, b) => b.score - a.score);
     return fused.slice(0, topK);
   }
@@ -1268,74 +1364,6 @@ export interface CallEdge {
   toLine: number;
   toName: string;
   viaFile: string;
-}
-
-// Common English/question function words carry no lexical signal for code
-// search but, OR'd into the MATCH, would let bm25 reward chunks that merely
-// repeat them — dethroning the true answer on natural-language queries. Dropped
-// so the lexical arm matches on the meaningful terms only.
-const FTS_STOPWORDS = new Set([
-  'the', 'a', 'an', 'of', 'to', 'in', 'on', 'at', 'by', 'for', 'and', 'or',
-  'is', 'are', 'was', 'were', 'be', 'been', 'do', 'does', 'did', 'has', 'have',
-  'this', 'that', 'these', 'those', 'it', 'its', 'as', 'with', 'from', 'into',
-  'where', 'what', 'which', 'who', 'whom', 'how', 'why', 'when',
-]);
-
-// Bumped whenever the FTS *content* format changes (e.g. adding split-identifier
-// tokens). A stored index whose stamp differs is rebuilt from existing chunk
-// text on the next writer start — no re-embed, just a lexical re-index.
-const FTS_VERSION = '2';
-
-// Split a camelCase / snake_case / kebab-case identifier into its sub-words.
-// FTS5's word tokenizer treats `getUserById` as ONE token, so a two-word query
-// ("user by id") never matches it. Emitting the sub-words at index (and query)
-// time fixes that. Returns [] when the token isn't a compound identifier.
-function splitIdentifier(token: string): string[] {
-  const spaced = token
-    .replace(/[_-]+/g, ' ')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
-  if (spaced === token) return [];
-  return spaced.split(/\s+/).filter((w) => w.length > 0);
-}
-
-// Augment text for the FTS index: the original text plus the sub-words of any
-// compound identifiers in it, so both `cosineSimilarity` and the phrase "cosine
-// similarity" match the same chunk. Only the extra split-words are appended (the
-// originals are already present), deduped to keep the addition small.
-function ftsAugment(text: string): string {
-  const words = text.match(/[A-Za-z0-9]+/g) ?? [];
-  const extra = new Set<string>();
-  for (const w of words) {
-    for (const part of splitIdentifier(w)) extra.add(part.toLowerCase());
-  }
-  return extra.size > 0 ? `${text} ${[...extra].join(' ')}` : text;
-}
-
-// Turn a free-text query into a safe FTS5 MATCH expression. User queries
-// contain punctuation ("where's the cache?") and FTS operators that would be a
-// syntax error or mean something unintended, so we extract bare word/identifier
-// tokens and OR them as quoted single-token phrases. OR (not the FTS default
-// AND) maximises lexical recall — RRF then ranks; a chunk matching more terms
-// naturally scores better on bm25. Stopwords are removed first. Returns null
-// when nothing usable remains (e.g. an all-stopword query) so the caller falls
-// back to pure vector search.
-function toFtsMatch(text: string): string | null {
-  const raw = (text.match(/[A-Za-z0-9_]+/g) ?? []).filter(
-    (t) => t.length >= 2 && !FTS_STOPWORDS.has(t.toLowerCase()),
-  );
-  // Include each token AND its identifier sub-words, so a camelCase query term
-  // matches the split tokens now stored in the index (and vice-versa).
-  const set = new Set<string>();
-  for (const t of raw) {
-    set.add(t);
-    for (const part of splitIdentifier(t)) {
-      if (part.length >= 2 && !FTS_STOPWORDS.has(part.toLowerCase())) set.add(part);
-    }
-  }
-  const tokens = [...set].slice(0, 48);
-  if (tokens.length === 0) return null;
-  return tokens.map((t) => `"${t}"`).join(' OR ');
 }
 
 function blobToVector(blob: Uint8Array): Float32Array {

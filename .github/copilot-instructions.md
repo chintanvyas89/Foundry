@@ -64,7 +64,13 @@ name lookup, ranked exact > prefix > substring) instead of semantic_search, whic
 is weaker at exact names. It covers callables (with their code) and, once the
 symbol table is built, non-callable declarations (shown with their kind and
 location). Use semantic_search when you know *what the code does* but not what
-it's called; use search_symbol when you know the name.
+it's called; use search_symbol when you know the name. The two already
+complement each other: semantic_search auto-probes the symbol table for
+compound-identifier candidates in a multi-word query (e.g. "xyz block" also
+checks for `xyzBlock`), so a query mixing meaning with a likely identifier
+benefits from both without you calling search_symbol separately — and a
+multi-word query is no longer diluted by a common word one part of it happens
+to share with thousands of other chunks.
 
 ## Reading results efficiently
 

@@ -5,7 +5,11 @@ import { embed } from '../embedding/embedder.js';
 import { indexState } from '../indexing/indexState.js';
 import type { VectorStore, CallGraphNode } from '../storage/store.js';
 import { blend } from '../storage/similarity.js';
+import { planQuery } from '../storage/queryPlan.js';
+import { findSymbolMatches } from './searchSymbol.js';
+import { resolveVocabulary } from '../vocab/index.js';
 import type { Config } from '../config.js';
+import type { SearchResult } from '../types.js';
 
 // Relevance-feedback tuning per mode. `find` is a plain search; `refine` leans
 // harder on pinned results and keeps only high-confidence hits; `expand`
@@ -35,7 +39,11 @@ export function registerSemanticSearchTool(
       'reading files or grepping — to answer "where is X implemented?", "what code ' +
       'handles Y?", or "find code similar to Z" across this codebase. It ranks the ' +
       'most relevant functions/classes by semantic similarity to a natural-language ' +
-      'or code query (not keyword match). ' +
+      'or code query (not keyword match). Multi-word queries that mix a likely ' +
+      'identifier with a common word (e.g. "xyz block") are handled internally — ' +
+      'compound/proximity matching plus an auto-complement to symbol lookup keep a ' +
+      'rare identifier from being drowned out by the common word\'s other uses; no ' +
+      'need to query the parts separately or pre-guess casing (xyzBlock/xyz_block). ' +
       'BY DEFAULT it returns a TOKEN-LEAN list: each hit as its symbol, file:line ' +
       'range, score, and one-line signature — enough to pick the right place without ' +
       'pulling whole function bodies into context. To read the full code of specific ' +
@@ -186,15 +194,33 @@ export function registerSemanticSearchTool(
       const direction = components.length === 1 ? queryEmbedding : blend(components);
 
       const k = topK ?? config.topKDefault * tuning.topKFactor;
-      // Hybrid retrieval: the blended vector drives semantic ranking while the
-      // raw query text (plus any note) drives the lexical/FTS arm, so exact
-      // identifiers the embedding misses still surface. Degrades to pure vector
-      // search when FTS5 is unavailable.
+      // Hybrid retrieval: the blended vector drives semantic ranking while a
+      // TIERED lexical plan — built by the query planner — sharpens it: a
+      // compound-identifier or proximity match can surface a rare hit
+      // (`xyzBlock`) even past a ubiquitous term ("block") that would
+      // otherwise dilute both the mean-pooled query embedding and a flat
+      // keyword OR. `vocabTerms` folds in project vocabulary (this project's
+      // own config-index/symbol data, plus any declared/pack synonyms — see
+      // vocab/index.ts) so a phrase like "content type" also resolves toward
+      // this project's actual identifiers. Degrades to pure vector search
+      // when FTS5 is unavailable.
       const textQuery = note && note.trim() ? `${query} ${note}` : query;
-      let results = store.searchHybrid(direction, textQuery, k);
+      const vocabTerms = resolveVocabulary(workspaceRoot, store, textQuery);
+      const plan = planQuery(textQuery, {
+        docFrequency: (t) => store.docFrequency(t),
+        totalChunks: store.totalChunkCount(),
+        vocabTerms,
+      });
+      let results = store.searchHybrid(direction, textQuery, k, plan);
       if (tuning.minScore > 0) {
         results = results.filter((r) => r.score >= tuning.minScore);
       }
+      // Auto-inject: complement the ranked hybrid results with strong
+      // exact/prefix symbol-table matches for the plan's compound/vocab
+      // candidates — the SAME lookup search_symbol uses (findSymbolMatches),
+      // so a query that mixes meaning with a likely identifier (e.g. "xyz
+      // block") benefits from both tools without the caller switching.
+      results = injectSymbolMatches(store, plan.symbolProbes, results, k);
 
       // Remember this result set so a follow-up call can pin by result number.
       lastResultIds = results.map((r) => r.id);
@@ -279,6 +305,56 @@ function indexingStatus(): { note: string; indexing: { building: boolean; percen
       'incomplete, re-run shortly for full coverage.\n\n',
     indexing: { building: true, percent: s.percent },
   };
+}
+
+// Merge in strong (exact/prefix) symbol-table matches for the plan's
+// compound/vocab candidates, deduped against the existing hybrid results and
+// each other, then re-sorted so they surface at the top (capped, so this
+// stays a precision boost, not a flood) — the search_symbol complement to a
+// query that mixes meaning with a likely identifier. Scored clearly above the
+// hybrid band (real symbol score + 0.2) so display order matches confidence;
+// substring-only matches (score < 0.9) are excluded as too noisy to inject.
+const SYMBOL_INJECT_CAP = 3;
+const SYMBOL_INJECT_MIN_SCORE = 0.9;
+
+function injectSymbolMatches(
+  store: VectorStore,
+  probes: string[],
+  existing: SearchResult[],
+  topK: number,
+): SearchResult[] {
+  if (probes.length === 0) return existing;
+  const existingKeys = new Set(existing.map((r) => symbolKey(r.file, r.symbol, r.startLine)));
+  const seen = new Set<string>();
+  const injected: SearchResult[] = [];
+  for (const probe of probes) {
+    if (injected.length >= SYMBOL_INJECT_CAP) break;
+    for (const hit of findSymbolMatches(store, probe, 3)) {
+      if (hit.score < SYMBOL_INJECT_MIN_SCORE) continue;
+      const key = symbolKey(hit.file, hit.symbol, hit.startLine);
+      if (existingKeys.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      injected.push({
+        id: hit.id ?? `symbol:${hit.file}:${hit.startLine}`,
+        file: hit.file,
+        symbol: hit.symbol,
+        startLine: hit.startLine,
+        endLine: hit.endLine,
+        text: hit.text ?? '',
+        contentHash: hit.id ?? '',
+        score: hit.score + 0.2,
+      });
+      if (injected.length >= SYMBOL_INJECT_CAP) break;
+    }
+  }
+  if (injected.length === 0) return existing;
+  const merged = [...injected, ...existing];
+  merged.sort((a, b) => b.score - a.score);
+  return merged.slice(0, topK);
+}
+
+function symbolKey(file: string, symbol: string | undefined, line: number): string {
+  return `${file}|${symbol ?? ''}|${line}`;
 }
 
 // Structural context for a result (opt-in via `context`): callers/callees from

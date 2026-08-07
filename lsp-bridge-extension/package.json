@@ -56,7 +56,7 @@
       {
         "name": "foundry_semanticSearch",
         "displayName": "Foundry: semantic code search",
-        "modelDescription": "Search THIS workspace's code by meaning using the local, offline Foundry index. Returns ranked symbols with file:line ranges and one-line signatures. Prefer this over reading files to locate where functionality lives. Pass expand with result numbers to fetch full bodies of specific hits.",
+        "modelDescription": "Search THIS workspace's code by meaning using the local, offline Foundry index. Returns ranked symbols with file:line ranges and one-line signatures. Prefer this over reading files to locate where functionality lives. Pass expand with result numbers to fetch full bodies of specific hits. Multi-word queries mixing a likely identifier with a common word (e.g. \"xyz block\") are handled internally — compound/proximity matching plus an auto-complement to symbol lookup keep a rare identifier from being drowned out by the common word's other uses; you don't need to query the parts separately.",
         "userDescription": "Search your codebase by meaning using the local Foundry index.",
         "toolReferenceName": "foundryCodebase",
         "canBeReferencedInPrompt": true,
@@ -95,7 +95,7 @@
         "toolReferenceName": "foundrySearchSymbol",
         "canBeReferencedInPrompt": true,
         "displayName": "Foundry: symbol lookup",
-        "modelDescription": "Look up a symbol by exact or partial name in this workspace (functions, classes, methods, and non-callable declarations like interfaces/enums/types). Use when you know the identifier name.",
+        "modelDescription": "Look up a symbol by exact or partial name in this workspace (functions, classes, methods, and non-callable declarations like interfaces/enums/types). Use when you know the identifier name. foundry_semanticSearch already auto-probes this same index for compound-identifier candidates in multi-word queries, so the two complement each other automatically — call this directly only when you already have a specific name to check.",
         "icon": "$(symbol-method)",
         "tags": [
           "foundry",

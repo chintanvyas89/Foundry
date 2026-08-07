@@ -6,7 +6,7 @@ import type { Config } from '../config.js';
 
 // A merged symbol match: from the chunk index (has `text`/`id`), the standalone
 // symbols table (has `kind`), or both.
-interface SymbolHit {
+export interface SymbolHit {
   id?: string;
   file: string;
   symbol: string;
@@ -17,9 +17,62 @@ interface SymbolHit {
   score: number;
 }
 
-// Exact/partial symbol-NAME lookup — the complement to semantic_search. Purely
-// local over the stored index (no embedder, no bridge), so it works instantly
-// and offline. Ranks exact > prefix > substring.
+// Exact-NAME symbol lookup over the stored index — the shared logic behind the
+// search_symbol tool AND semantic_search's auto-inject (queries share this so
+// the two tools complement rather than duplicate each other; see
+// semanticSearch.ts's use of this for compound/vocab candidates). Purely local
+// (no embedder, no bridge). Ranks exact > prefix > substring.
+export function findSymbolMatches(store: VectorStore, name: string, limit: number): SymbolHit[] {
+  const q = name.trim().toLowerCase();
+  const scoreOf = (n: string): number => {
+    const s = n.toLowerCase();
+    return s === q ? 1 : s.startsWith(q) ? 0.9 : 0.75;
+  };
+
+  // Union two sources, keyed by name+file+line so a symbol present in both is
+  // merged (not duplicated): chunk symbols carry the code body; the standalone
+  // symbols table carries the kind and the non-callable declarations that
+  // never became chunks. The table may be empty (not built) — then this is
+  // exactly the old chunk-only behaviour.
+  const key = (file: string, sym: string, line: number): string => `${sym}|${file}|${line}`;
+  const byKey = new Map<string, SymbolHit>();
+
+  for (const r of store.searchSymbols(name.trim())) {
+    byKey.set(key(r.file, r.symbol, r.startLine), {
+      id: r.id,
+      file: r.file,
+      symbol: r.symbol,
+      startLine: r.startLine,
+      endLine: r.endLine,
+      text: r.text,
+      score: scoreOf(r.symbol),
+    });
+  }
+  for (const r of store.searchSymbolsTable(name.trim())) {
+    const k = key(r.file, r.name, r.startLine);
+    const existing = byKey.get(k);
+    if (existing) {
+      existing.kind = r.kind; // annotate the callable chunk with its kind
+    } else {
+      byKey.set(k, {
+        file: r.file,
+        symbol: r.name,
+        kind: r.kind,
+        startLine: r.startLine,
+        endLine: r.endLine,
+        score: scoreOf(r.name),
+      });
+    }
+  }
+
+  return [...byKey.values()]
+    .sort((a, b) => b.score - a.score || a.symbol.length - b.symbol.length)
+    .slice(0, limit);
+}
+
+// Find a symbol by NAME (exact or partial) — the complement to semantic_search
+// (meaning-based). Purely local over the stored index, so it works instantly
+// and offline.
 export function registerSearchSymbolTool(
   server: McpServer,
   store: VectorStore,
@@ -35,7 +88,10 @@ export function registerSearchSymbolTool(
       '(interfaces, enums, type aliases, constants) once the symbol table is built. ' +
       'Returns matches ranked exact > prefix > substring, each with its file:line, ' +
       'kind, and (for callables) code. For "what does X do" or "where is Y handled", ' +
-      'prefer semantic_search.',
+      'prefer semantic_search — though semantic_search now also auto-probes this same ' +
+      'index for compound-identifier candidates in multi-word queries, so the two ' +
+      'complement each other automatically for queries that mix meaning and a ' +
+      'likely identifier (e.g. "xyz block").',
     {
       name: z
         .string()
@@ -43,51 +99,7 @@ export function registerSearchSymbolTool(
       limit: z.number().int().positive().optional().describe('Max results (default 8).'),
     },
     async ({ name, limit }) => {
-      const q = name.trim().toLowerCase();
-      const scoreOf = (n: string): number => {
-        const s = n.toLowerCase();
-        return s === q ? 1 : s.startsWith(q) ? 0.9 : 0.75;
-      };
-
-      // Union two sources, keyed by name+file+line so a symbol present in both is
-      // merged (not duplicated): chunk symbols carry the code body; the standalone
-      // symbols table carries the kind and the non-callable declarations that
-      // never became chunks. The table may be empty (not built) — then this is
-      // exactly the old chunk-only behaviour.
-      const key = (file: string, sym: string, line: number): string => `${sym}|${file}|${line}`;
-      const byKey = new Map<string, SymbolHit>();
-
-      for (const r of store.searchSymbols(name.trim())) {
-        byKey.set(key(r.file, r.symbol, r.startLine), {
-          id: r.id,
-          file: r.file,
-          symbol: r.symbol,
-          startLine: r.startLine,
-          endLine: r.endLine,
-          text: r.text,
-          score: scoreOf(r.symbol),
-        });
-      }
-      for (const r of store.searchSymbolsTable(name.trim())) {
-        const k = key(r.file, r.name, r.startLine);
-        const existing = byKey.get(k);
-        if (existing) {
-          existing.kind = r.kind; // annotate the callable chunk with its kind
-        } else {
-          byKey.set(k, {
-            file: r.file,
-            symbol: r.name,
-            kind: r.kind,
-            startLine: r.startLine,
-            endLine: r.endLine,
-            score: scoreOf(r.name),
-          });
-        }
-      }
-
-      const ranked = [...byKey.values()]
-        .sort((a, b) => b.score - a.score || a.symbol.length - b.symbol.length)
-        .slice(0, limit ?? config.topKDefault);
+      const ranked = findSymbolMatches(store, name, limit ?? config.topKDefault);
 
       if (ranked.length === 0) {
         return {
