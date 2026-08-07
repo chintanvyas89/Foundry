@@ -1,50 +1,54 @@
 import * as vscode from 'vscode';
 import { ExecutionService } from './executor/executionService';
-import { runPlanAgent, seedMessages } from './executor/planAgent';
-import { openChangeDiff } from './executor/editTools';
+import { runAgent, seedMessages, emitUnbuiltIndexHint } from './executor/planAgent';
+import { openAllChangesDiff } from './executor/editTools';
+import { FOUNDRY_TOOL_PREFIX } from './languageModelTools';
 
-// `@codebase /implement` — the chat-only execution driver. It runs the approved plan
-// as ONE continuous LLM loop (planAgent) against the headless ExecutionService, and
-// pauses at the checkpoints the model declares. Because the plan was already reviewed
-// and approved, each pause is a lightweight Continue (plus an Auto-continue escape).
-// ALL UI is here in the chat: streamed progress, Open Diff, and Continue / Undo /
-// Retry / Skip / Keep buttons. Buttons re-enter this handler via a module-level
-// RunState (a chat turn can't pause, so decisions are cross-turn).
+// The @codebase agent driver — runs the unified agent loop (planAgent.ts) for
+// every turn and renders the outcome. There is no separate plan/execute
+// command: the loop itself decides whether a turn just answers, proposes a
+// plan, or makes changes; this module only cares about RENDERING that outcome
+// (streamed progress already happened inside the loop) and, when changes were
+// made, the end-of-run Review/Keep/Undo decision. No mid-run checkpoints — a
+// run that edits does so autonomously to completion or until blocked.
+//
+// State is a module-level singleton, same limitation as before: VS Code
+// exposes no session id to a chat participant, so this can't be properly keyed
+// per chat panel. `chatContext.history` still gives per-turn continuity (the
+// model sees prior turns' rendered text), which is what makes "give me a plan"
+// then "go ahead" work across two turns without a hard re-discovery requirement
+// — full tool-call-level memory across turns is a separate, deferred piece.
 
-type PendingAction = 'continue' | 'autoContinue' | 'undoCheckpoint' | 'retry' | 'skip';
+type PendingAction = 'retry' | 'skip' | 'keep' | 'undoAll';
 
 interface RunState {
   runId: string;
   messages: vscode.LanguageModelChatMessage[];
   service: ExecutionService;
   workspaceRoot: string;
-  originalRequest: string;
-  planText: string;
-  autoContinue: boolean;
+  requestPrompt: string; // for the agent-mode escape handoff
+  answerText: string; // last answer/plan text, for the agent-mode escape handoff
+  cumulativeTokens: number;
   pendingAction?: PendingAction;
-  totalTokens: number; // running ~token estimate across the whole run (see planAgent.ts)
 }
 
 let run: RunState | undefined;
 
-export function registerImplementCommands(context: vscode.ExtensionContext): void {
+export function registerAgentCommands(context: vscode.ExtensionContext): void {
   const reenter = (action: PendingAction) => {
     if (!run) return;
     run.pendingAction = action;
-    void vscode.commands.executeCommand('workbench.action.chat.open', { query: '@codebase /implement' });
+    void vscode.commands.executeCommand('workbench.action.chat.open', { query: '@codebase (resuming)' });
   };
   context.subscriptions.push(
-    vscode.commands.registerCommand('foundry.impl.continue', () => reenter('continue')),
-    vscode.commands.registerCommand('foundry.impl.autoContinue', () => reenter('autoContinue')),
-    vscode.commands.registerCommand('foundry.impl.undoCheckpoint', () => reenter('undoCheckpoint')),
-    vscode.commands.registerCommand('foundry.impl.retry', () => reenter('retry')),
-    vscode.commands.registerCommand('foundry.impl.skip', () => reenter('skip')),
-    vscode.commands.registerCommand('foundry.impl.keep', () => {
+    vscode.commands.registerCommand('foundry.agent.retry', () => reenter('retry')),
+    vscode.commands.registerCommand('foundry.agent.skip', () => reenter('skip')),
+    vscode.commands.registerCommand('foundry.agent.keep', () => {
       run?.service.keep();
       run = undefined;
       vscode.window.showInformationMessage('Foundry: kept all changes from this run.');
     }),
-    vscode.commands.registerCommand('foundry.impl.undoAll', async () => {
+    vscode.commands.registerCommand('foundry.agent.undoAll', async () => {
       if (run) {
         const { restored, failed } = await run.service.undoAll();
         vscode.window.showInformationMessage(
@@ -53,22 +57,13 @@ export function registerImplementCommands(context: vscode.ExtensionContext): voi
       }
       run = undefined;
     }),
-    vscode.commands.registerCommand('foundry.impl.openDiff', async (files?: string[]) => {
-      if (!run || !files || files.length === 0) return;
-      if (files.length === 1) {
-        await openChangeDiff(run.service, files[0]);
-        return;
-      }
-      const picked = await vscode.window.showQuickPick(
-        files.map((f) => ({ label: vscode.workspace.asRelativePath(f), description: f, absPath: f })),
-        { placeHolder: 'Select a changed file to view its diff' },
-      );
-      if (picked) await openChangeDiff(run.service, picked.absPath);
+    vscode.commands.registerCommand('foundry.agent.reviewAll', async () => {
+      if (run) await openAllChangesDiff(run.service, run.service.changedFiles);
     }),
   );
 }
 
-export async function runImplement(
+export async function runAgentTurn(
   request: vscode.ChatRequest,
   chatContext: vscode.ChatContext,
   stream: vscode.ChatResponseStream,
@@ -77,79 +72,44 @@ export async function runImplement(
 ): Promise<vscode.ChatResult> {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
-    stream.markdown('Open a folder in VS Code first — there is nothing to implement against.');
+    stream.markdown('Open a folder in VS Code first.');
     return {};
   }
 
-  // Resume from a button action (cross-turn).
+  // Resume from a button action (cross-turn — a chat turn can't pause mid-flight).
   if (run && run.pendingAction) {
     const st = run;
-    const action: PendingAction = run.pendingAction;
+    const action = st.pendingAction;
     st.pendingAction = undefined;
-    await resume(st, action, request, stream, token, output);
+    if (action === 'retry') {
+      st.messages.push(vscode.LanguageModelChatMessage.User('Reconsider and try again, differently this time.'));
+    } else if (action === 'skip') {
+      st.messages.push(
+        vscode.LanguageModelChatMessage.User(
+          'Stop trying that part — finish up treating what has been applied so far as final.',
+        ),
+      );
+    }
+    await runOnce(request, stream, token, output);
     return {};
   }
 
-  // Fresh start.
-  const { planText, originalRequest } = resolvePlan(request, chatContext);
-  if (!planText) {
-    stream.markdown(
-      'I need a plan to implement. Run `@codebase /plan <the change>` first, then `@codebase /implement`.',
-    );
-    return {};
-  }
+  // Fresh turn.
+  const service = new ExecutionService(workspaceRoot);
   run = {
     runId: `run-${Date.now()}`,
-    messages: seedMessages(planText, originalRequest),
-    service: new ExecutionService(workspaceRoot),
+    messages: await seedMessages(chatContext, request),
+    service,
     workspaceRoot,
-    originalRequest,
-    planText,
-    autoContinue: false,
-    totalTokens: 0,
+    requestPrompt: request.prompt,
+    answerText: '',
+    cumulativeTokens: 0,
   };
-  stream.markdown('### Implementing the plan\n\nI’ll work through it and pause at checkpoints for your review.\n');
-  pushUser(run, 'Begin implementing the plan now. Work through it in order, and pause at the first natural checkpoint.');
-  await runSegment(request, stream, token, output);
+  await runOnce(request, stream, token, output);
   return {};
 }
 
-async function resume(
-  st: RunState,
-  action: PendingAction,
-  request: vscode.ChatRequest,
-  stream: vscode.ChatResponseStream,
-  token: vscode.CancellationToken,
-  output: vscode.OutputChannel,
-): Promise<void> {
-  switch (action) {
-    case 'autoContinue':
-      st.autoContinue = true;
-    // falls through — auto-continue is "continue, and don't stop at the next checkpoints"
-    case 'continue':
-      st.service.commitSegment();
-      pushUser(st, 'Continue with the next part of the plan.');
-      break;
-    case 'undoCheckpoint':
-      await st.service.revertSegment();
-      stream.markdown('\n\n↩ Reverted the last checkpoint’s changes.\n');
-      renderDecisionButtons(stream);
-      return; // wait for the user's next choice
-    case 'retry':
-      // Keep any partial edits (blocked) or start clean (post-undo); beginSegment in
-      // runSegment is idempotent, so either way this folds into one segment.
-      pushUser(st, 'Reconsider and implement that part of the plan again, differently this time.');
-      break;
-    case 'skip':
-      st.service.commitSegment(); // keep whatever was applied so far; move past the blocker
-      pushUser(st, 'Skip that part and continue with the rest of the plan.');
-      break;
-  }
-  await runSegment(request, stream, token, output);
-}
-
-// Run one segment of the brain loop and render its outcome (checkpoint / done / blocked).
-async function runSegment(
+async function runOnce(
   request: vscode.ChatRequest,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
@@ -157,9 +117,8 @@ async function runSegment(
 ): Promise<void> {
   const st = run;
   if (!st) return;
-  st.service.beginSegment(); // idempotent — ensures a segment layer is open
 
-  const result = await runPlanAgent({
+  const result = await runAgent({
     request,
     stream,
     token,
@@ -167,108 +126,72 @@ async function runSegment(
     workspaceRoot: st.workspaceRoot,
     messages: st.messages,
   });
+  st.cumulativeTokens = result.cumulativeTokens;
+  st.answerText = result.answerText;
 
-  st.totalTokens = result.cumulativeTokens; // cumulative already includes every prior segment
+  for (const f of result.refs) stream.reference(vscode.Uri.file(f));
 
-  if (token.isCancellationRequested) {
-    st.service.commitSegment();
-    stream.markdown('\n\n⏹ **Cancelled.**\n');
-    renderKeepUndo(stream);
+  if (!result.answered) {
+    stream.markdown(
+      '_I gathered context from the local index but the model returned no answer. ' +
+        'See the “Semantic Search” output channel — the index may be empty, or the ' +
+        'selected model may not support tool calls (pick a Copilot model)._',
+    );
+  } else if (result.usedTools.length > 0) {
+    const names = result.usedTools.map((n) => n.replace(FOUNDRY_TOOL_PREFIX, '')).join(', ');
+    stream.markdown(`\n\n---\n_Grounded via the local index: ${names}._`);
+  }
+  if (result.sawUnbuiltIndex) emitUnbuiltIndexHint(stream);
+  renderTokenUsage(stream, result.tokensUsed, st.cumulativeTokens);
+
+  if (st.service.changeCount === 0) {
+    // Pure Q&A/plan answer — nothing to keep or undo. Offer the native
+    // agent-mode escape only for a substantive plan/finding, same threshold
+    // as before, so a one-line answer doesn't get a handoff button.
+    if (result.answered) offerAgentModeEscape(stream, st.requestPrompt, st.answerText);
+    run = undefined;
     return;
   }
 
-  renderChangedFiles(stream, result.changedFiles);
-  renderTokenUsage(stream, result.segmentTokens, st.totalTokens);
+  renderChangedFiles(stream, st.service.changedFiles);
 
   if (result.status === 'blocked') {
-    output.appendLine(`[implement] blocked: ${result.reason}`);
+    output.appendLine(`[agent] blocked: ${result.reason}`);
     stream.markdown(`\n\n⛔ **Blocked:** ${result.reason ?? 'the agent could not proceed.'}\n`);
     stream.markdown('_Partial changes are left in place so you can inspect them._\n');
     renderDecisionButtons(stream);
     return;
   }
 
-  if (result.status === 'done') {
-    st.service.commitSegment();
-    finishRun(stream);
-    return;
-  }
-
-  // checkpoint — auto-continue straight through, or pause for the user.
-  if (result.summary) stream.markdown(`\n\n⏸ **Checkpoint:** ${result.summary}\n`);
-  if (st.autoContinue) {
-    st.service.commitSegment();
-    pushUser(st, 'Continue with the next part of the plan.');
-    await runSegment(request, stream, token, output);
-    return;
-  }
-  renderCheckpointButtons(stream);
+  finishRun(stream);
 }
 
 function finishRun(stream: vscode.ChatResponseStream): void {
-  stream.markdown('\n\n---\n🎉 **Plan implemented.**\n');
+  stream.markdown('\n\n---\n🎉 **Done.**\n');
   renderKeepUndo(stream);
 }
 
-// Client-side ~token estimate (see planAgent.ts) — not exact billed usage, since
-// VS Code's stable chat API reports no server-side usage figure; a proxy via the
-// model's own tokenizer is the best available signal.
-function renderTokenUsage(stream: vscode.ChatResponseStream, segmentTokens: number, totalTokens: number): void {
-  stream.markdown(`\n_~${fmtTokens(segmentTokens)} tokens this step · ~${fmtTokens(totalTokens)} total this run._\n`);
-}
-
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-}
-
-// Offer Keep / Undo-all if the run touched anything; otherwise clear the run.
 function renderKeepUndo(stream: vscode.ChatResponseStream): void {
   const st = run;
   if (!st) return;
   const changed = st.service.changeCount;
-  if (changed === 0) {
-    run = undefined;
-    return;
-  }
-  stream.markdown(
-    `\n**${changed} file${changed === 1 ? '' : 's'} changed. Tested it? Keep the run or revert everything:**\n`,
-  );
-  stream.button({ command: 'foundry.impl.keep', title: '✓ Keep changes' });
-  stream.button({ command: 'foundry.impl.undoAll', title: '↩ Undo all changes' });
+  stream.markdown(`\n**${changed} file${changed === 1 ? '' : 's'} changed. Review, then:**\n`);
+  stream.button({ command: 'foundry.agent.keep', title: '✓ Keep changes' });
+  stream.button({ command: 'foundry.agent.undoAll', title: '↩ Undo all changes' });
 }
 
-// One "Open Diff" button per step, not one per file — clicking it opens the
-// file directly if there's only one, or a quickpick to choose among several
-// (see the foundry.impl.openDiff command). The explicit file list is passed
-// as the button's argument (not read from the service at click-time) so it
-// still opens the RIGHT files even after the run has moved past this step.
 function renderChangedFiles(stream: vscode.ChatResponseStream, files: string[]): void {
   if (files.length === 0) return;
-  stream.markdown(`\n\n**${files.length} file${files.length === 1 ? '' : 's'} changed:**\n`);
   for (const f of files) stream.anchor(vscode.Uri.file(f));
-  stream.button({ command: 'foundry.impl.openDiff', title: '🔍 Open Diff', arguments: [files] });
-}
-
-function renderCheckpointButtons(stream: vscode.ChatResponseStream): void {
-  stream.markdown('\n**Review the diff, then:**\n');
-  stream.button({ command: 'foundry.impl.continue', title: '✓ Continue' });
-  stream.button({ command: 'foundry.impl.undoCheckpoint', title: '↩ Undo this checkpoint' });
-  stream.button({ command: 'foundry.impl.autoContinue', title: '⏩ Auto-continue to end' });
-  const st = run;
-  if (st) offerAgentModeEscape(stream, st.originalRequest, st.planText);
+  stream.button({ command: 'foundry.agent.reviewAll', title: '🔍 Review all changes' });
 }
 
 function renderDecisionButtons(stream: vscode.ChatResponseStream): void {
   const st = run;
-  stream.markdown('\n**How do you want to proceed?**\n');
-  stream.button({ command: 'foundry.impl.retry', title: '↻ Retry' });
-  stream.button({ command: 'foundry.impl.skip', title: '⤼ Skip & continue' });
-  if (st) offerAgentModeEscape(stream, st.originalRequest, st.planText);
-  stream.button({ command: 'foundry.impl.undoAll', title: '↩ Undo all changes' });
-}
-
-function pushUser(st: RunState, text: string): void {
-  st.messages.push(vscode.LanguageModelChatMessage.User(text));
+  stream.button({ command: 'foundry.agent.retry', title: '↻ Retry' });
+  stream.button({ command: 'foundry.agent.skip', title: '⤼ Skip & finish' });
+  if (st) offerAgentModeEscape(stream, st.requestPrompt, st.answerText);
+  stream.button({ command: 'foundry.agent.undoAll', title: '↩ Undo all changes' });
 }
 
 function offerAgentModeEscape(stream: vscode.ChatResponseStream, request: string, content: string): void {
@@ -276,39 +199,12 @@ function offerAgentModeEscape(stream: vscode.ChatResponseStream, request: string
   stream.button({ command: 'foundry.implementPlan', title: '⚡ Continue in agent mode', arguments: [{ request, content }] });
 }
 
-// The plan to implement: an inline plan pasted after `/implement`, else the most
-// recent substantive @codebase response in this chat (the last /plan output).
-function resolvePlan(
-  request: vscode.ChatRequest,
-  chatContext: vscode.ChatContext,
-): { planText: string; originalRequest: string } {
-  const inline = request.prompt.trim();
-  if (inline.length >= 40) return { planText: inline, originalRequest: '' };
-  const hist = chatContext.history;
-  for (let i = hist.length - 1; i >= 0; i--) {
-    const turn = hist[i];
-    if (turn instanceof vscode.ChatResponseTurn) {
-      const text = responseText(turn);
-      if (text.trim().length >= 40) {
-        let originalRequest = '';
-        for (let j = i - 1; j >= 0; j--) {
-          const prev = hist[j];
-          if (prev instanceof vscode.ChatRequestTurn) {
-            originalRequest = prev.prompt;
-            break;
-          }
-        }
-        return { planText: text, originalRequest };
-      }
-    }
-  }
-  return { planText: '', originalRequest: '' };
+// Client-side ~token estimate (see planAgent.ts) — not exact billed usage, since
+// VS Code's stable chat API reports no server-side usage figure.
+function renderTokenUsage(stream: vscode.ChatResponseStream, tokensThisTurn: number, cumulativeTokens: number): void {
+  stream.markdown(`\n_~${fmtTokens(tokensThisTurn)} tokens this turn · ~${fmtTokens(cumulativeTokens)} total this run._\n`);
 }
 
-function responseText(turn: vscode.ChatResponseTurn): string {
-  let text = '';
-  for (const part of turn.response) {
-    if (part instanceof vscode.ChatResponseMarkdownPart) text += part.value.value;
-  }
-  return text;
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }

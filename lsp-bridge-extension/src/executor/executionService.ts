@@ -2,18 +2,28 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { WorkspaceCheckpoint } from '../execution/checkpoint';
 import { formatDocument } from '../workspace/formatter';
+import { resolveSymbol, SymbolTarget } from '../workspace/symbolResolver';
 
-// The headless execution backend (execution-v2.md / chat-only plan). It is the
-// SOLE owner of editing + undo; it has no UI and does no reasoning. The chat
-// participant's LLM brain streams structured changes here via apply(); the result
-// (ok / reason / diagnostics) flows back to the model, which adapts. Every change
-// is validated before it touches disk, and originals are checkpointed so any step
-// — or the whole run — can be reverted.
+// The headless execution backend. It is the SOLE owner of editing + undo; it has
+// no UI and does no reasoning. The chat participant's LLM brain streams
+// structured changes here via apply(); the result (ok / reason / diagnostics)
+// flows back to the model, which adapts. Every change is validated before it
+// touches disk, and originals are checkpointed so the whole run can be reverted.
+//
+// No mid-run checkpoints: there is one run-level checkpoint, not a per-segment
+// layer — the model runs autonomously to completion (or blocked), and the only
+// undo point is "revert everything this run touched."
 
 export type EditChange =
   | { op: 'edit_file'; path: string; find: string; replace: string; all?: boolean }
   | { op: 'create_file'; path: string; contents: string; overwrite?: boolean }
-  | { op: 'delete_file'; path: string };
+  | { op: 'delete_file'; path: string }
+  | { op: 'replace_symbol'; target: SymbolTarget; replacement: string }
+  | { op: 'insert_near_symbol'; target: SymbolTarget; code: string; position: 'before' | 'after' }
+  | { op: 'rename_symbol'; target: SymbolTarget; newName: string }
+  | { op: 'add_import'; path: string; statement: string }
+  | { op: 'remove_import'; path: string; statement: string }
+  | { op: 'move_file'; from: string; to: string };
 
 export interface DiagnosticInfo {
   severity: 'error' | 'warning' | 'info' | 'hint';
@@ -24,63 +34,23 @@ export interface DiagnosticInfo {
 export interface ApplyResult {
   ok: boolean;
   reason?: string; // present when ok === false — fed back to the LLM verbatim
-  file?: string; // repo-relative path that changed
+  file?: string; // repo-relative path that changed (the primary one)
+  files?: string[]; // ALL repo-relative paths changed, when more than one (rename/move)
   diagnostics?: DiagnosticInfo[]; // best-effort, for self-check
 }
 
 export class ExecutionService {
   private checkpoint = new WorkspaceCheckpoint();
   private readonly changed = new Set<string>(); // absolute paths changed this run
-  // Per-segment layer: a file's bytes as they were at the START of the current
-  // segment (the work between two user decisions), so "Undo this checkpoint" can
-  // revert just this segment without losing earlier, already-continued work.
-  private segmentLayer: Map<string, Uint8Array | null> | undefined;
 
   constructor(private readonly workspaceRoot: string) {}
 
-  // Segment boundaries (called by the chat driver around each checkpoint segment).
-  // Idempotent: if a segment is already open, keep it (so a Retry that continues a
-  // partially-applied segment folds into the same layer).
-  beginSegment(): void {
-    if (!this.segmentLayer) this.segmentLayer = new Map();
-  }
-  commitSegment(): void {
-    this.segmentLayer = undefined; // keep changes; run-level checkpoint still backs Undo-all
-  }
-  async revertSegment(): Promise<void> {
-    if (!this.segmentLayer) return;
-    for (const [abs, bytes] of this.segmentLayer) {
-      const uri = vscode.Uri.file(abs);
-      try {
-        if (bytes === null) await vscode.workspace.fs.delete(uri).then(undefined, () => undefined);
-        else await vscode.workspace.fs.writeFile(uri, bytes);
-      } catch {
-        /* best effort */
-      }
-    }
-    this.segmentLayer = undefined;
-  }
-
-  // Capture a file's originals into both the run checkpoint (before-run, for
-  // Undo-all) and the current segment layer (before-this-segment, for Undo-checkpoint).
   private async snapshot(absPath: string): Promise<void> {
     await this.checkpoint.capture([absPath]);
-    if (this.segmentLayer && !this.segmentLayer.has(absPath)) {
-      try {
-        this.segmentLayer.set(absPath, await vscode.workspace.fs.readFile(vscode.Uri.file(absPath)));
-      } catch {
-        this.segmentLayer.set(absPath, null);
-      }
-    }
   }
 
   get changedFiles(): string[] {
     return [...this.changed];
-  }
-  // Files touched during the CURRENT segment (keys of the segment layer). Valid
-  // until commitSegment/revertSegment clears it.
-  get currentSegmentFiles(): string[] {
-    return this.segmentLayer ? [...this.segmentLayer.keys()] : [];
   }
   get changeCount(): number {
     return this.changed.size;
@@ -103,8 +73,22 @@ export class ExecutionService {
           return await this.createFile(change);
         case 'delete_file':
           return await this.deleteFile(change);
-        default:
-          return { ok: false, reason: `unknown op ${(change as { op: string }).op}` };
+        case 'replace_symbol':
+          return await this.replaceSymbol(change);
+        case 'insert_near_symbol':
+          return await this.insertNearSymbol(change);
+        case 'rename_symbol':
+          return await this.renameSymbolOp(change);
+        case 'add_import':
+          return await this.addImport(change);
+        case 'remove_import':
+          return await this.removeImport(change);
+        case 'move_file':
+          return await this.moveFile(change);
+        default: {
+          const _never: never = change;
+          return { ok: false, reason: `unknown op ${(_never as { op: string }).op}` };
+        }
       }
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
@@ -134,7 +118,6 @@ export class ExecutionService {
       };
     }
 
-    await this.snapshot(absPath);
     const edit = new vscode.WorkspaceEdit();
     let from = 0;
     for (;;) {
@@ -144,7 +127,7 @@ export class ExecutionService {
       if (c.all !== true) break;
       from = idx + c.find.length;
     }
-    return this.commit(edit, absPath, c.path);
+    return this.commit(edit, [absPath], c.path);
   }
 
   private async createFile(c: { path: string; contents: string; overwrite?: boolean }): Promise<ApplyResult> {
@@ -160,11 +143,10 @@ export class ExecutionService {
     if (exists && c.overwrite !== true) {
       return { ok: false, reason: `${c.path} already exists — use edit_file, or pass overwrite=true` };
     }
-    await this.snapshot(absPath);
     const edit = new vscode.WorkspaceEdit();
     edit.createFile(uri, { overwrite: c.overwrite === true, ignoreIfExists: false });
     if (c.contents) edit.insert(uri, new vscode.Position(0, 0), c.contents);
-    return this.commit(edit, absPath, c.path);
+    return this.commit(edit, [absPath], c.path);
   }
 
   private async deleteFile(c: { path: string }): Promise<ApplyResult> {
@@ -184,32 +166,134 @@ export class ExecutionService {
     return { ok: true, file: vscode.workspace.asRelativePath(absPath) };
   }
 
-  private async commit(edit: vscode.WorkspaceEdit, absPath: string, relForMsg: string): Promise<ApplyResult> {
+  // Replace a resolved symbol's FULL declaration (signature + body) — more
+  // robust than apply_edit for a whole-function/method/class rewrite, since it
+  // doesn't require reproducing the current text exactly.
+  private async replaceSymbol(c: { target: SymbolTarget; replacement: string }): Promise<ApplyResult> {
+    const r = await resolveSymbol(c.target, this.workspaceRoot);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(r.document.uri, r.fullRange, c.replacement);
+    return this.commit(edit, [this.abs(c.target.file)], c.target.file);
+  }
+
+  private async insertNearSymbol(c: {
+    target: SymbolTarget;
+    code: string;
+    position: 'before' | 'after';
+  }): Promise<ApplyResult> {
+    const r = await resolveSymbol(c.target, this.workspaceRoot);
+    const edit = new vscode.WorkspaceEdit();
+    if (c.position === 'before') {
+      const pos = new vscode.Position(r.fullRange.start.line, 0);
+      edit.insert(r.document.uri, pos, c.code.endsWith('\n') ? c.code : c.code + '\n');
+    } else {
+      const endLine = r.fullRange.end.line;
+      const pos = new vscode.Position(endLine, r.document.lineAt(endLine).text.length);
+      edit.insert(r.document.uri, pos, c.code.startsWith('\n') ? c.code : '\n' + c.code);
+    }
+    return this.commit(edit, [this.abs(c.target.file)], c.target.file);
+  }
+
+  // Rename a symbol EVERYWHERE it's referenced, via the language server's own
+  // rename provider — not a text search, so it's safe across files.
+  private async renameSymbolOp(c: { target: SymbolTarget; newName: string }): Promise<ApplyResult> {
+    const r = await resolveSymbol(c.target, this.workspaceRoot);
+    const renameEdit = await vscode.commands.executeCommand<vscode.WorkspaceEdit | undefined>(
+      'vscode.executeDocumentRenameProvider',
+      r.document.uri,
+      r.selectionRange.start,
+      c.newName,
+    );
+    if (!renameEdit || renameEdit.size === 0) {
+      return {
+        ok: false,
+        reason: `rename provider produced no edits for "${c.target.symbol}" in ${c.target.file} — the language server may not support rename here`,
+      };
+    }
+    const files = renameEdit.entries().map(([u]) => u.fsPath);
+    return this.commit(renameEdit, files, c.target.file);
+  }
+
+  private async addImport(c: { path: string; statement: string }): Promise<ApplyResult> {
+    const absPath = this.abs(c.path);
+    let doc: vscode.TextDocument;
+    try {
+      doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+    } catch {
+      return { ok: false, reason: `file not found: ${c.path}` };
+    }
+    const line = importInsertLine(doc);
+    const edit = new vscode.WorkspaceEdit();
+    const stmt = c.statement.endsWith('\n') ? c.statement : c.statement + '\n';
+    edit.insert(doc.uri, new vscode.Position(line, 0), stmt);
+    return this.commit(edit, [absPath], c.path);
+  }
+
+  private async removeImport(c: { path: string; statement: string }): Promise<ApplyResult> {
+    const absPath = this.abs(c.path);
+    let doc: vscode.TextDocument;
+    try {
+      doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+    } catch {
+      return { ok: false, reason: `file not found: ${c.path}` };
+    }
+    const edit = new vscode.WorkspaceEdit();
+    let found = false;
+    for (let i = 0; i < doc.lineCount; i++) {
+      if (doc.lineAt(i).text.includes(c.statement)) {
+        edit.delete(doc.uri, doc.lineAt(i).rangeIncludingLineBreak);
+        found = true;
+        break;
+      }
+    }
+    // Unlike a no-op-tolerant search, report not-found as an error — consistent
+    // with how apply_edit treats a non-matching `find`: a clear signal the model
+    // should react to (re-check the exact import text) rather than a silent no-op.
+    if (!found) return { ok: false, reason: `import statement "${c.statement}" not found in ${c.path}` };
+    return this.commit(edit, [absPath], c.path);
+  }
+
+  private async moveFile(c: { from: string; to: string }): Promise<ApplyResult> {
+    const fromAbs = this.abs(c.from);
+    const toAbs = this.abs(c.to);
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(vscode.Uri.file(fromAbs), vscode.Uri.file(toAbs), { overwrite: false });
+    return this.commit(edit, [fromAbs, toAbs], c.from);
+  }
+
+  // Apply an edit that may touch one or more files: snapshot every path's
+  // pre-edit bytes (for Undo-all) BEFORE applying, then format+save+diagnose
+  // each afterward. A single-file op just passes a 1-element array.
+  private async commit(edit: vscode.WorkspaceEdit, absPaths: string[], relForMsg: string): Promise<ApplyResult> {
+    for (const p of absPaths) await this.snapshot(p);
     const applied = await vscode.workspace.applyEdit(edit);
     if (!applied) return { ok: false, reason: `VS Code rejected the edit to ${relForMsg}` };
-    this.changed.add(absPath);
+    for (const p of absPaths) this.changed.add(p);
+
     // Formatting and saving are two separate risks — a formatter throwing (no
-    // formatter registered, a formatter error, etc.) must NEVER prevent the save.
-    // Previously both were in one try/catch: if formatDocument() threw, doc.save()
-    // never ran, silently leaving the edit unsaved (dirty) in the editor. Undo/
-    // checkpoint restore then writes the ORIGINAL bytes straight to disk, but a
-    // still-dirty open editor doesn't reliably pick that up — from the outside
-    // this looked exactly like "Undo all" missing some files.
-    try {
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+    // formatter registered, a formatter error, etc.) must never prevent the
+    // save, which is what actually gets a change to disk (and thus visible to
+    // Undo-all's checkpoint restore).
+    for (const p of absPaths) {
       try {
-        await formatDocument(doc);
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(p));
+        try {
+          await formatDocument(doc);
+        } catch {
+          /* formatting is best-effort — never block saving the actual edit */
+        }
+        if (doc.isDirty) await doc.save();
       } catch {
-        /* formatting is best-effort — never block saving the actual edit */
+        /* file may have been deleted/moved — ignore */
       }
-      if (doc.isDirty) await doc.save();
-    } catch {
-      /* file may have been deleted/moved — ignore */
     }
+
+    const primary = absPaths[0];
     return {
       ok: true,
-      file: vscode.workspace.asRelativePath(absPath),
-      diagnostics: await this.readDiagnostics(absPath),
+      file: vscode.workspace.asRelativePath(primary),
+      files: absPaths.length > 1 ? absPaths.map((p) => vscode.workspace.asRelativePath(p)) : undefined,
+      diagnostics: await this.readDiagnostics(primary),
     };
   }
 
@@ -237,6 +321,17 @@ export class ExecutionService {
     this.checkpoint = new WorkspaceCheckpoint();
     this.changed.clear();
   }
+}
+
+// Insert new imports right after the last existing import-ish line, else at the top.
+function importInsertLine(doc: vscode.TextDocument): number {
+  const IMPORT_RE = /^\s*(import|from|#include|using|use\s|require|@import|package\s|namespace\s)/;
+  let last = -1;
+  const scan = Math.min(doc.lineCount, 200); // imports live near the top
+  for (let i = 0; i < scan; i++) {
+    if (IMPORT_RE.test(doc.lineAt(i).text)) last = i;
+  }
+  return last === -1 ? 0 : last + 1;
 }
 
 function countOccurrences(haystack: string, needle: string): number {

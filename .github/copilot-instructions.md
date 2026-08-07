@@ -177,29 +177,36 @@ verify commands) grounded in this workspace? → `foundry_plan` — it returns a
 context pack (overview, most-relevant code with full bodies, relevant config, call-sites,
 build/test manifests) plus a plan template; it does not edit files.
 
-There's also a `@codebase` chat
-participant that answers workspace questions by driving these tools itself. For a
-visual overview, `@codebase /arch` renders a Mermaid module dependency graph and
-`@codebase /graph <symbol>` renders a Mermaid call graph (both offline, no model
-call). `@codebase`/`@codebase /plan` answers end with two buttons: **▶ Implement here
-(Foundry)** and **⚡ Implement in agent mode**.
+There's also a `@codebase` chat participant that answers workspace questions — and, when asked,
+makes actual changes — by driving these tools itself. For a visual overview, `@codebase /arch`
+renders a Mermaid module dependency graph and `@codebase /graph <symbol>` renders a Mermaid call
+graph (both offline, no model call). When a `@codebase` answer is a plan/finding with no changes
+made, it ends with **⚡ Continue in agent mode** as a manual escape.
 
-## Executing a plan: `@codebase /implement`
+## `@codebase`: one mode, model decides
 
-`@codebase /implement` runs the most recent (already-approved) plan as **one continuous LLM loop,
-entirely in the chat** (see `execution-v2.md`). It's a **brain + headless hands** design:
-- **Brain** — a single continuous LLM loop (the chat participant) with the `foundry_*` lookup tools
-  **plus a small edit tool set** (`apply_edit`/`create_file`/`delete_file`) and nothing else (no
-  built-in VS Code tools). It works through the whole plan in order, grounding every edit in the real
-  current code before changing it. The plan is **not** pre-chopped into steps — the model paces itself.
-- **Hands** — a headless `ExecutionService` that **validates + applies + checkpoints** each change
-  and returns `{ok, reason, diagnostics}`. The failure reason flows back to the brain, which
-  self-corrects (e.g. a stale `apply_edit` `find` → "no match" → re-read + retry).
-The brain streams its work and **pauses at the natural checkpoints it declares** (`[CHECKPOINT: …]`),
-showing the changed files with an **Open Diff** button (native diff editor) and — because the plan is
-already approved — a lightweight **Continue** / **Undo this checkpoint** / **Auto-continue to end**.
-When it finishes (`[DONE]`) the chat offers **Keep** / **Undo all**. If it can't proceed (`[BLOCKED: …]`)
-the run pauses with **Retry / Skip & continue** (partial edits are kept for inspection) / **Undo all**.
-All UI is in the chat — no separate view. **⚡ Continue in agent mode** remains as a manual escape.
-There is no separate "Foundry" custom agent — the `foundry_*` tools / `#foundryCodebase` work in normal
-agent mode too.
+`@codebase` has **no separate `/plan` or `/implement` command** — every message goes through ONE
+continuous agentic loop (see `execution-v2.md`) with the `foundry_*` lookup tools **and** the edit
+tools (`apply_edit`, `create_file`, `delete_file`, `replace_symbol`, `insert_near_symbol`,
+`rename_symbol`, `add_import`, `remove_import`, `move_file`) always available together — no built-in
+VS Code tools. The model itself decides, from what was actually asked, whether to just answer,
+propose a plan (and stop), or ground itself and make the change:
+- "what does X do" / "how is Y handled" → answers directly, no edits.
+- "how would I…" / "what would it take to…" → answers with a structured plan, no edits.
+- "fix X" / "implement Y" / "add Z" → grounds via `foundry_*`, then edits directly using whichever
+  edit tool fits: `apply_edit` for a small known-text tweak; `replace_symbol`/`insert_near_symbol`
+  for a whole function/method/class (resolved by NAME via the language server, not text matching —
+  more robust than reproducing exact current text); `rename_symbol` for a true cross-reference
+  rename via the language server's own rename provider.
+Edits are validated + applied + checkpointed by a headless `ExecutionService`
+(`{ok, reason, diagnostics}`); a failure reason flows back to the model, which self-corrects (e.g. a
+stale `apply_edit` `find` → "no match" → re-read + retry; an ambiguous symbol name → an error
+listing every match → retry with `container`/`index`/`signature`).
+
+**No mid-run checkpoints** — once the model decides to edit, it runs autonomously to completion (or
+until genuinely stuck, `[BLOCKED: …]`) in one pass; there's no per-step pause to approve. Review
+happens **once, at the end**: **🔍 Review all changes** opens every changed file in one multi-file
+changes editor (not a picker), then **✓ Keep** / **↩ Undo all**. If blocked, partial edits are kept
+for inspection with **↻ Retry** / **⤼ Skip & finish** / **↩ Undo all**. All UI is in the chat — no
+separate view. There is no separate "Foundry" custom agent — the `foundry_*` tools / `#foundryCodebase`
+work in normal agent mode too.

@@ -11,7 +11,7 @@ import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
 import { registerLanguageModelTools } from './languageModelTools';
 import { registerChatParticipant } from './chatParticipant';
-import { registerImplementCommands } from './implement';
+import { registerAgentCommands } from './implement';
 import { registerDiffProvider } from './executor/editTools';
 
 let server: net.Server | undefined;
@@ -47,10 +47,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('sweSearch.focusPanel', () =>
       vscode.commands.executeCommand('sweSearch.panel.focus'),
     ),
-    // Manual ESCAPE hatch: hand a plan/answer from @codebase (read-only) to VS
-    // Code's built-in agent mode (full native toolset). The primary path is now
-    // in-house execution (@codebase /implement, see implement.ts); this button
-    // remains for when agent mode is the better fit.
+    // Manual ESCAPE hatch: hand a plan/answer from @codebase to VS Code's
+    // built-in agent mode (full native toolset). @codebase now edits in-house
+    // by default (see implement.ts / executor/planAgent.ts); this button
+    // remains for when agent mode is the better fit — offered only when a turn
+    // produced a plan/finding with no changes made.
     vscode.commands.registerCommand(
       'foundry.implementPlan',
       async (payload?: string | { request?: string; content?: string }) => {
@@ -84,24 +85,13 @@ export function activate(context: vscode.ExtensionContext) {
         }
       },
     ),
-    // Primary in-house path: open `@codebase /implement`, which compiles the most
-    // recent plan (from this chat's history) into a Workflow IR and executes it.
-    vscode.commands.registerCommand('foundry.executePlanHere', async () => {
-      try {
-        await vscode.commands.executeCommand('workbench.action.chat.open', {
-          query: '@codebase /implement',
-        });
-      } catch {
-        vscode.window.showWarningMessage("Couldn't open @codebase to implement the plan.");
-      }
-    }),
   );
 
-  // In-house execution: `@codebase /implement` runs the plan step-by-step via the
-  // headless ExecutionService + per-step LLM brain, entirely in the chat. These
-  // register the Approve/Skip/Retry/Keep/Undo chat-button commands and the native
-  // "Open Diff" content provider.
-  registerImplementCommands(context);
+  // @codebase edits in-house by default — one continuous agent loop (no
+  // separate plan/execute command), with no mid-run checkpoints. These
+  // register the Retry/Skip/Keep/Undo/Review-all-changes chat-button commands
+  // and the native "changes" diff content provider.
+  registerAgentCommands(context);
   registerDiffProvider(context);
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);

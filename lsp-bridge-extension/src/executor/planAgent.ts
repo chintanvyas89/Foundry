@@ -3,60 +3,169 @@ import { FOUNDRY_TOOL_PREFIX } from '../languageModelTools';
 import { EDIT_TOOLS, EDIT_TOOL_NAMES, runEditTool } from './editTools';
 import { ExecutionService } from './executionService';
 
-// The LLM "brain": drives ONE continuous tool-calling loop over the whole approved
-// plan — foundry_* to look up the real code, and the edit tools to change it (which
-// route to the headless ExecutionService). Reuses the same shape as chatParticipant's
-// runAgentic. It streams its work to chat and runs until it reaches a natural
-// checkpoint, finishes, or is blocked. The conversation `messages` persists across
-// turns (checkpoints), so the brain keeps full context as the user continues it.
+// The ONE @codebase agent loop — answers questions, proposes plans, AND makes
+// changes, all through the same tool-calling loop. There is no separate
+// "planning mode" vs "execution mode": the tool list always includes both the
+// foundry_* lookups and the edit tools, and the model itself decides — from
+// what the user actually asked — whether to just answer, propose a plan (and
+// stop), or ground itself and go make the change. No mid-run checkpoints: once
+// it decides to edit, it runs autonomously to completion or until genuinely
+// stuck. This also means no separate "planning" conversation whose context gets
+// discarded before "execution" starts — it is the same conversation throughout.
 
-const MAX_ROUNDS = 15;
-const MAX_TOOL_RESULT_CHARS = 6000;
+const MAX_ROUNDS = 40; // generous: one run may need to cover a whole multi-file change
+const MAX_TOOL_RESULT_CHARS = 4000;
+// Larger budget for tools that return actual source (search full bodies, read_file)
+// — that's the code the model reasons over; still bounded, since results re-send
+// every subsequent round.
+const MAX_CODE_RESULT_CHARS = 8000;
 
-const EXECUTION_SYSTEM = [
-  'You are Foundry’s execution agent. You implement an APPROVED plan in the user’s workspace,',
-  'working through it in order in ONE continuous pass. Rules:',
-  '1) The plan below already identifies WHAT to change and roughly WHERE — TRUST IT. Go straight to a',
-  'TARGETED foundry_readFile(file, symbol="name") for the exact symbol you are about to touch (or',
-  'foundry_searchSymbol if you need its exact location). Do NOT re-run broad foundry_semanticSearch',
-  'discovery for something the plan already names — you have no memory of the planning conversation,',
-  'but the plan text IS its output; re-discovering what it already found wastes calls. Only fall back',
-  'to broader search when the plan is genuinely vague about where something lives.',
-  '2) A targeted symbol/line-range read is enough to edit safely — you do NOT need the whole file.',
-  'apply_edit’s `find` just needs to be the EXACT current text of the specific snippet you are',
-  'replacing, unique in the file.',
-  '3) Change files ONLY with apply_edit / create_file / delete_file. If `find` errors, re-read the',
-  'exact symbol/lines (something may have shifted) and retry with corrected text.',
-  '4) Implement ONLY what the plan says — no unrelated changes.',
-  '5) After editing, if diagnostics report errors you introduced, fix them before moving on.',
-  '6) You have NO other tools (no terminal, no built-in search).',
-  'PACING: after completing each logical unit of the plan, STOP and end your turn with',
-  '"[CHECKPOINT: <one-line summary of what you just did>]" so the user can review — do NOT keep going',
-  'past a checkpoint in the same turn. When the ENTIRE plan is implemented, end with "[DONE]".',
-  'If you genuinely cannot proceed even after retrying, end with "[BLOCKED: <short reason>]".',
+const AGENT_PREAMBLE = [
+  'You are @codebase, a coding assistant for the user’s CURRENT VS Code workspace. A local,',
+  'offline code index is available through the foundry_* tools: foundry_semanticSearch,',
+  'foundry_searchSymbol, foundry_traceCalls, foundry_showExecutionFlow, foundry_findUsages,',
+  'foundry_findImplementations, foundry_architectureOverview, foundry_repoOverview,',
+  'foundry_readFile, foundry_listDirectory, foundry_projectStandards, foundry_searchConfig.',
+  'ALWAYS ground answers in this workspace by calling these tools before answering — never',
+  'guess from memory. You ALSO have edit tools (apply_edit, create_file, delete_file,',
+  'replace_symbol, insert_near_symbol, rename_symbol, add_import, remove_import, move_file) —',
+  'no built-in VS Code tools, no terminal.',
+  '\n\nDECIDE YOUR RESPONSE FROM WHAT THE USER ACTUALLY ASKED — there is no separate',
+  '"plan mode"/"execute mode"; you choose per message:',
+  '\n• An EXPLANATION ("what does X do", "how is Y handled")? Answer directly. Call no edit tools.',
+  '\n• A PLAN, not the change itself ("how would I…", "what would it take to…", "should I…")?',
+  'Answer with ONLY this markdown, filling every section, and call no edit tools:',
+  '\n## Plan\n**Context:** current state in 1–2 lines.',
+  '\n**Assumptions & open questions:** anything inferred or needing confirmation.',
+  '\n**Files to change:** a bullet per file as `path` — what changes and why.',
+  '\n**Steps:** a numbered, ordered list of concrete edits.',
+  '\n**Risks / staleness:** what could break or go stale.',
+  '\n**Verify:** the exact test/build commands (from real conventions/manifests you found) and a manual check.',
+  '\n• AN ACTUAL FIX/CHANGE ("fix X", "implement Y", "add Z", "refactor…")? Ground yourself via',
+  'foundry_* tools, then make the change directly with the edit tools — work through everything',
+  'needed to completion in ONE continuous pass. Do not pause partway to ask permission once',
+  'you\'ve decided edits are wanted; there is no per-step approval — the user reviews everything',
+  'you changed at the end and can undo it all in one action, so proceed.',
+  '\nIf genuinely unclear which of these three the user wants, ask ONE clarifying question rather',
+  'than guessing.',
+  '\n\nWHEN YOU DO EDIT: 1) Look up the REAL current code first — never edit from memory. A',
+  'targeted foundry_readFile(file, symbol="name") is enough; you don\'t need the whole file. 2)',
+  'Choose the right tool: apply_edit for a small tweak where you know the exact current text;',
+  'replace_symbol to rewrite a WHOLE function/method/class (resolved by name via the language',
+  'server — you don\'t need its exact current text); insert_near_symbol to add code next to an',
+  'existing symbol; rename_symbol for a TRUE rename that must update every reference;',
+  'add_import/remove_import/move_file for the obvious cases; create_file/delete_file for new or',
+  'removed files. 3) On a "symbol not found"/"ambiguous" error, add container/index/signature and',
+  'retry — don\'t fall back to guessing text. On an apply_edit "not found" error, re-read the exact',
+  'current text and retry. 4) Implement ONLY what\'s actually being asked — no unrelated changes.',
+  '5) After editing, if diagnostics report errors you introduced, fix them before finishing.',
+  '\n\nChoosing a LOOKUP tool (this matters — pick by what the user gave you):',
+  '\n• Wants the repo LAYOUT / directory structure / "where do files live"? →',
+  'foundry_listDirectory (a recursive file/folder tree; drill with path="…").',
+  '\n• A PHP/Drupal repo, or a fully-qualified class name (has backslashes, e.g.',
+  '`Drupal\\market\\Entity\\Foo`)? → foundry_readFile accepts the FQCN directly (it',
+  'resolves to the file); call foundry_projectStandards to learn the framework and the',
+  'namespace→directory (PSR-4) map, or "what standard/framework does this project use".',
+  '\n• Names a specific SYMBOL (function/class/type/constant)? → foundry_searchSymbol',
+  '(an exact name lookup). Do NOT use semanticSearch to find something named exactly.',
+  '\n• Names a specific MODULE, DIRECTORY, or FILE? → foundry_architectureOverview',
+  'with module="…" to locate it, then foundry_readFile to read its actual source. Do',
+  'NOT semanticSearch a module/file name.',
+  '\n• Asks about CONFIG — Drupal views/fields/displays, routes, permissions,',
+  'services, a module’s dependencies, or any .yml setting ("which view lists X",',
+  '"what fields does the Article type have", "what handles the /foo route")? →',
+  'foundry_searchConfig (structured config is NOT in semanticSearch — it is never',
+  'embedded), then foundry_readFile for the raw YAML.',
+  '\n• Describes BEHAVIOUR but not a name ("how/where is X handled")? →',
+  'foundry_semanticSearch to discover it by meaning.',
+  '\n\nThen DRILL into what you found instead of searching again. foundry_readFile is',
+  'TWO-PASS to save tokens: call it with just `file` first to get the OUTLINE (the',
+  'file\'s functions/classes/methods with line ranges, no bodies), then call it again',
+  'with `symbol="name"` to read just the code you need. (Or foundry_semanticSearch',
+  'expand=[…] for a hit\'s full body.) Follow relationships with foundry_traceCalls /',
+  'foundry_findUsages. To iterate a search, prefer mode:"refine"/"expand" or pinResults',
+  '(cheap — reuses results). Re-run a fresh semanticSearch only for a genuinely different',
+  'question, or when the first pass clearly missed — not to reword the same intent.',
+  '\n\nCite concrete files as `path:line`. Be specific to this codebase.',
 ].join(' ');
 
-export type PlanRunStatus = 'checkpoint' | 'done' | 'blocked';
+export type AgentRunStatus = 'finished' | 'blocked';
 
-export interface PlanRunResult {
-  status: PlanRunStatus;
-  summary?: string; // checkpoint summary (what was just done)
-  reason?: string; // blocked reason
-  changedFiles: string[]; // absolute paths changed during this segment
-  segmentTokens: number; // ~tokens spent in this segment (all rounds) — client-side estimate
-  cumulativeTokens: number; // ~tokens spent in the whole run so far (all segments)
+export interface AgentRunResult {
+  status: AgentRunStatus;
+  reason?: string; // present when status === 'blocked'
+  answered: boolean; // did the model stream any answer text?
+  answerText: string; // accumulated answer/plan text, for the agent-mode handoff
+  changedFiles: string[]; // absolute paths changed this run
+  refs: string[]; // absolute file paths surfaced by tool results, for stream.reference
+  usedTools: string[]; // foundry_* tool names called, for the "Grounded via" trailer
+  sawUnbuiltIndex: boolean;
+  tokensUsed: number; // ~tokens spent in THIS invocation (client-side estimate)
+  cumulativeTokens: number; // ~tokens spent across the whole run so far (incl. retries)
 }
 
-export function seedMessages(planText: string, originalRequest: string): vscode.LanguageModelChatMessage[] {
-  return [
-    vscode.LanguageModelChatMessage.User(EXECUTION_SYSTEM),
-    vscode.LanguageModelChatMessage.User(
-      `Original request:\n${originalRequest || '(not provided)'}\n\nApproved plan:\n${planText}`,
-    ),
-  ];
+// Workspace custom-instruction files, in priority order. Built-in Copilot reads
+// these automatically for its own chat; a third-party participant must load them
+// itself. Capped so a long instructions file can't dominate the prompt.
+const CONVENTION_FILES = ['.github/copilot-instructions.md', 'AGENTS.md', '.github/AGENTS.md'];
+const MAX_CONVENTION_CHARS = 4000;
+
+async function loadProjectConventions(): Promise<string | null> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return null;
+  const parts: string[] = [];
+  for (const name of CONVENTION_FILES) {
+    try {
+      const uri = vscode.Uri.joinPath(folder.uri, name);
+      const raw = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8').trim();
+      if (raw) parts.push(`# ${name}\n${raw}`);
+    } catch {
+      /* not present — skip */
+    }
+  }
+  if (parts.length === 0) return null;
+  const joined = parts.join('\n\n');
+  return joined.length > MAX_CONVENTION_CHARS
+    ? `${joined.slice(0, MAX_CONVENTION_CHARS)}\n…(truncated)`
+    : joined;
 }
 
-export interface PlanAgentContext {
+// Seed a fresh run: the preamble, project conventions, prior turns in this chat
+// (replayed from the rendered text VS Code exposes — not a full tool-call
+// transcript; see the module doc in implement.ts for why), and the new prompt.
+export async function seedMessages(
+  chatContext: vscode.ChatContext,
+  request: vscode.ChatRequest,
+): Promise<vscode.LanguageModelChatMessage[]> {
+  const messages: vscode.LanguageModelChatMessage[] = [vscode.LanguageModelChatMessage.User(AGENT_PREAMBLE)];
+
+  const conventions = await loadProjectConventions();
+  if (conventions) {
+    messages.push(
+      vscode.LanguageModelChatMessage.User(
+        'Project conventions from this workspace (supplementary context; the tool-routing ' +
+          `guidance above remains authoritative):\n\n${conventions}`,
+      ),
+    );
+  }
+
+  for (const turn of chatContext.history) {
+    if (turn instanceof vscode.ChatRequestTurn) {
+      messages.push(vscode.LanguageModelChatMessage.User(turn.prompt));
+    } else if (turn instanceof vscode.ChatResponseTurn) {
+      let text = '';
+      for (const part of turn.response) {
+        if (part instanceof vscode.ChatResponseMarkdownPart) text += part.value.value;
+      }
+      if (text.trim()) messages.push(vscode.LanguageModelChatMessage.Assistant(text));
+    }
+  }
+
+  messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
+  return messages;
+}
+
+export interface AgentContext {
   request: vscode.ChatRequest;
   stream: vscode.ChatResponseStream;
   token: vscode.CancellationToken;
@@ -65,49 +174,53 @@ export interface PlanAgentContext {
   messages: vscode.LanguageModelChatMessage[];
 }
 
-// Run the brain until it emits a control marker (or the round budget is spent).
-// `messages` must already contain the seed + whatever user turn kicked off / resumed
-// this segment; this function only appends the assistant/tool exchange.
-export async function runPlanAgent(ctx: PlanAgentContext): Promise<PlanRunResult> {
+export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
   const { request, stream, token, service, workspaceRoot, messages } = ctx;
+  const model = request.model;
   const foundryTools = vscode.lm.tools
     .filter((t) => t.name.startsWith(FOUNDRY_TOOL_PREFIX))
     .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
   const tools: vscode.LanguageModelChatTool[] = [...foundryTools, ...EDIT_TOOLS];
 
-  // Token accounting — a CLIENT-SIDE ESTIMATE via the model's own tokenizer
-  // (vscode.LanguageModelChat has no server-reported usage API, so this is a
-  // proxy, not exact billing). `cumulativeContext` tracks the running size of
-  // `messages` as it grows; each round's input cost is a SNAPSHOT of that
-  // total (what actually gets re-sent that round), so this reflects the real
-  // repeated-resend cost without re-tokenizing the whole history every round.
-  let cumulativeContext = 0;
-  for (const m of messages) cumulativeContext += await countTokensSafe(request.model, m, token);
-  let segmentTokens = 0;
+  const usedTools = new Set<string>();
+  const seenCalls = new Set<string>(); // (tool, input) already run this turn — skip repeats
+  const refs = new Set<string>();
+  let answered = false;
+  let answerText = '';
+  let endedMidTools = false;
+  let sawUnbuiltIndex = false;
+  let blockedReason: string | undefined;
 
-  let finalText = ''; // all assistant text this segment — scanned for control markers
-  let tailText = ''; // text from the final (no-tool-call) round — the closing turn
+  // Token accounting — a CLIENT-SIDE ESTIMATE via the model's own tokenizer
+  // (vscode.LanguageModelChat has no server-reported usage API). `cumulativeContext`
+  // tracks the running size of `messages`; each round's input cost is a snapshot of
+  // that total (what actually gets re-sent), so this reflects the real repeated-
+  // resend cost without re-tokenizing history every round.
+  let cumulativeContext = 0;
+  for (const m of messages) cumulativeContext += await countTokensSafe(model, m, token);
+  let tokensUsed = 0;
+
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    if (token.isCancellationRequested) {
-      return {
-        status: 'blocked',
-        reason: 'cancelled',
-        changedFiles: [...service.currentSegmentFiles],
-        segmentTokens,
-        cumulativeTokens: cumulativeContext,
-      };
-    }
-    segmentTokens += cumulativeContext; // this round re-sends everything accumulated so far
+    if (token.isCancellationRequested) break;
+    tokensUsed += cumulativeContext;
 
     let response: vscode.LanguageModelChatResponse;
     try {
-      response = await request.model.sendRequest(messages, { tools }, token);
+      response = await model.sendRequest(messages, { tools }, token);
     } catch (err) {
+      // Model can't do tool-calling (or tools rejected) — fall back to a single
+      // grounded pass so the participant still answers (no edit capability without
+      // tool calling, so this degrades to Q&A only).
+      const fallbackText = await runFallbackRag(request, stream, model, token);
       return {
-        status: 'blocked',
-        reason: `model request failed: ${String(err)}`,
-        changedFiles: [...service.currentSegmentFiles],
-        segmentTokens,
+        status: 'finished',
+        answered: true,
+        answerText: fallbackText,
+        changedFiles: [...service.changedFiles],
+        refs: [],
+        usedTools: [],
+        sawUnbuiltIndex: false,
+        tokensUsed,
         cumulativeTokens: cumulativeContext,
       };
     }
@@ -118,74 +231,125 @@ export async function runPlanAgent(ctx: PlanAgentContext): Promise<PlanRunResult
     for await (const part of response.stream) {
       if (part instanceof vscode.LanguageModelTextPart) {
         stream.markdown(part.value);
+        answered = answered || part.value.trim().length > 0;
         roundText += part.value;
-        finalText += part.value;
+        answerText += part.value;
         assistantParts.push(part);
       } else if (part instanceof vscode.LanguageModelToolCallPart) {
         toolCalls.push(part);
         assistantParts.push(part);
       }
     }
+    const outTokens = await countTokensSafe(model, roundText, token);
+    tokensUsed += outTokens;
+    cumulativeContext += outTokens;
 
-    if (toolCalls.length === 0) {
-      tailText = roundText; // the model ended its turn (marker lives here)
-      const outTokens = await countTokensSafe(request.model, roundText, token);
-      segmentTokens += outTokens;
-      cumulativeContext += outTokens;
-      break;
-    }
+    const blocked = /\[BLOCKED:?\s*([^\]]*)\]/i.exec(roundText);
+    if (blocked) blockedReason = blocked[1].trim() || 'the agent could not proceed';
+
+    if (toolCalls.length === 0) break; // model produced its final answer
+    endedMidTools = true;
+
     messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts));
-    const asstTokens = await countTokensSafe(request.model, messages[messages.length - 1], token);
-    segmentTokens += asstTokens;
+    const asstTokens = await countTokensSafe(model, messages[messages.length - 1], token);
+    tokensUsed += asstTokens;
     cumulativeContext += asstTokens;
 
     const resultParts: vscode.LanguageModelToolResultPart[] = [];
+    let newCalls = 0;
     for (const call of toolCalls) {
-      if (token.isCancellationRequested) {
-        return {
-          status: 'blocked',
-          reason: 'cancelled',
-          changedFiles: [...service.currentSegmentFiles],
-          segmentTokens,
-          cumulativeTokens: cumulativeContext,
-        };
-      }
+      if (token.isCancellationRequested) break;
       let resultText: string;
-      const input = (call.input ?? {}) as Record<string, unknown>;
+
       if (EDIT_TOOL_NAMES.has(call.name)) {
-        stream.progress(`✎ ${call.name} ${typeof input.path === 'string' ? input.path : ''}`);
-        resultText = await runEditTool(call.name, input, service, workspaceRoot);
+        const input = (call.input ?? {}) as Record<string, unknown>;
+        const key = callKey(call.name, input);
+        if (seenCalls.has(key)) {
+          resultText = '(Already attempted above with the same input — do not repeat this call; try something different.)';
+        } else {
+          seenCalls.add(key);
+          newCalls += 1;
+          stream.progress(`✎ ${call.name} ${typeof input.path === 'string' ? input.path : ''}`);
+          resultText = await runEditTool(call.name, input, service, workspaceRoot);
+        }
       } else {
-        stream.progress(labelFor(call));
-        try {
-          const r = await vscode.lm.invokeTool(
-            call.name,
-            { input, toolInvocationToken: request.toolInvocationToken },
-            token,
-          );
-          resultText = toolText(r);
-        } catch (err) {
-          resultText = `Tool ${call.name} failed: ${String(err)}`;
+        usedTools.add(call.name);
+        const input = boostSearchInput(call.name, call.input ?? {});
+        const key = callKey(call.name, input);
+        if (seenCalls.has(key)) {
+          resultText = '(Already retrieved above with the same input — reuse the earlier result; do not repeat this call.)';
+        } else {
+          seenCalls.add(key);
+          newCalls += 1;
+          stream.progress(labelFor(call));
+          try {
+            const r = await vscode.lm.invokeTool(
+              call.name,
+              { input, toolInvocationToken: request.toolInvocationToken },
+              token,
+            );
+            resultText = toolText(r);
+            collectRefs(resultText, refs);
+            if (!sawUnbuiltIndex && mentionsUnbuiltIndex(resultText)) sawUnbuiltIndex = true;
+          } catch (err) {
+            resultText = `Tool ${call.name} failed: ${String(err)}`;
+          }
         }
       }
+
       resultParts.push(
-        new vscode.LanguageModelToolResultPart(call.callId, [
-          new vscode.LanguageModelTextPart(head(resultText, MAX_TOOL_RESULT_CHARS)),
-        ]),
+        new vscode.LanguageModelToolResultPart(
+          call.callId,
+          [new vscode.LanguageModelTextPart(head(resultText, budgetFor(call.name)))],
+        ),
       );
     }
     messages.push(vscode.LanguageModelChatMessage.User(resultParts));
-    const toolTokens = await countTokensSafe(request.model, messages[messages.length - 1], token);
-    segmentTokens += toolTokens;
+    const toolTokens = await countTokensSafe(model, messages[messages.length - 1], token);
+    tokensUsed += toolTokens;
     cumulativeContext += toolTokens;
+
+    if (newCalls === 0) break; // every call this round was a repeat — model is spinning
   }
 
-  // Record the closing assistant turn (only the final round's text — earlier rounds
-  // were already pushed with their tool calls, so this avoids duplicating them).
-  if (tailText.trim()) messages.push(vscode.LanguageModelChatMessage.Assistant(tailText));
+  // The model may have spent all its rounds calling tools without ever
+  // synthesizing (or produced no text at all). Force one final, tool-free pass
+  // so the user always gets a written answer grounded in the tool results.
+  if ((endedMidTools || !answered) && !token.isCancellationRequested && !blockedReason) {
+    try {
+      const finalMessages = [
+        ...messages,
+        vscode.LanguageModelChatMessage.User(
+          'Now respond to the original request directly, using the tool results above (and any ' +
+            'edits already made). Cite concrete files as `path:line`. Do not call any more tools.',
+        ),
+      ];
+      const finalResp = await model.sendRequest(finalMessages, {}, token);
+      let finalText = '';
+      for await (const part of finalResp.text) {
+        stream.markdown(part);
+        finalText += part;
+        answerText += part;
+        answered = answered || part.trim().length > 0;
+      }
+      tokensUsed += await countTokensSafe(model, finalText, token);
+    } catch {
+      /* best effort — the streamed partial answer above still stands */
+    }
+  }
 
-  const result = classify(finalText, [...service.currentSegmentFiles]);
-  return { ...result, segmentTokens, cumulativeTokens: cumulativeContext };
+  return {
+    status: blockedReason ? 'blocked' : 'finished',
+    reason: blockedReason,
+    answered,
+    answerText,
+    changedFiles: [...service.changedFiles],
+    refs: [...refs],
+    usedTools: [...usedTools],
+    sawUnbuiltIndex,
+    tokensUsed,
+    cumulativeTokens: cumulativeContext,
+  };
 }
 
 async function countTokensSafe(
@@ -200,31 +364,41 @@ async function countTokensSafe(
   }
 }
 
-// Classify a finished segment from its control marker (last marker wins). No marker
-// means the turn ended (or hit the round budget) without a verdict → treat as a
-// checkpoint so the run pauses for the user rather than silently stopping.
-function classify(finalText: string, changedFiles: string[]): Omit<PlanRunResult, 'segmentTokens' | 'cumulativeTokens'> {
-  const markers = findMarkers(finalText);
-  const last = markers[markers.length - 1];
-  if (last?.kind === 'blocked') {
-    return { status: 'blocked', reason: last.text || 'the agent could not proceed', changedFiles };
+// Fallback when the model doesn't support tool-calling: retrieve with
+// semantic_search ourselves (via the LM tool directly) and ask the model to
+// answer from those results. No edit capability without tool calling.
+async function runFallbackRag(
+  request: vscode.ChatRequest,
+  stream: vscode.ChatResponseStream,
+  model: vscode.LanguageModelChat,
+  token: vscode.CancellationToken,
+): Promise<string> {
+  stream.progress('Searching the local index…');
+  let contextText = '';
+  try {
+    const r = await vscode.lm.invokeTool(
+      `${FOUNDRY_TOOL_PREFIX}semanticSearch`,
+      { input: { query: request.prompt, context: true }, toolInvocationToken: request.toolInvocationToken },
+      token,
+    );
+    contextText = toolText(r);
+  } catch {
+    /* leave context empty — the model will answer without grounding */
   }
-  if (last?.kind === 'done') {
-    return { status: 'done', changedFiles };
+  const messages = [
+    vscode.LanguageModelChatMessage.User(AGENT_PREAMBLE),
+    vscode.LanguageModelChatMessage.User(
+      `Workspace search results:\n\n${contextText || '(no results)'}\n\n` +
+        `Question: ${request.prompt}\n\nAnswer using the results above. Cite files as path:line.`,
+    ),
+  ];
+  const response = await model.sendRequest(messages, {}, token);
+  let text = '';
+  for await (const part of response.text) {
+    stream.markdown(part);
+    text += part;
   }
-  return { status: 'checkpoint', summary: last?.kind === 'checkpoint' ? last.text : '', changedFiles };
-}
-
-type Marker = { kind: 'checkpoint' | 'done' | 'blocked'; text: string };
-
-function findMarkers(text: string): Marker[] {
-  const out: Marker[] = [];
-  const re = /\[(CHECKPOINT|DONE|BLOCKED)(?::?\s*([^\]]*))?\]/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    out.push({ kind: m[1].toLowerCase() as Marker['kind'], text: (m[2] ?? '').trim() });
-  }
-  return out;
+  return text;
 }
 
 function toolText(r: vscode.LanguageModelToolResult): string {
@@ -243,4 +417,76 @@ function labelFor(call: vscode.LanguageModelToolCallPart): string {
 
 function head(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '\n…(truncated)' : s;
+}
+
+// Stable key for a tool call so repeats with the same input are detected
+// regardless of key order.
+function callKey(name: string, input: unknown): string {
+  let body: string;
+  try {
+    if (input && typeof input === 'object' && !Array.isArray(input)) {
+      const obj = input as Record<string, unknown>;
+      body = JSON.stringify(obj, Object.keys(obj).sort());
+    } else {
+      body = JSON.stringify(input);
+    }
+  } catch {
+    body = String(input);
+  }
+  return `${name}:${body}`;
+}
+
+// Code-bearing tools carry the actual source the model reasons over, so they get
+// a larger slice; signature/graph/overview tools stay lean (they re-send each round).
+function budgetFor(toolName: string): number {
+  return toolName === `${FOUNDRY_TOOL_PREFIX}semanticSearch` || toolName === `${FOUNDRY_TOOL_PREFIX}readFile`
+    ? MAX_CODE_RESULT_CHARS
+    : MAX_TOOL_RESULT_CHARS;
+}
+
+// Weak models often call foundry_semanticSearch and then reason over the compact
+// signatures it returns by default, producing shallow answers. When the model
+// hasn't asked for bodies (no expand, no explicit detail), request full bodies for
+// a bounded number of hits so it always has real code to work from.
+function boostSearchInput(name: string, input: object): Record<string, unknown> {
+  const obj = input as Record<string, unknown>;
+  if (name !== `${FOUNDRY_TOOL_PREFIX}semanticSearch`) return obj;
+  if ('expand' in obj || obj.detail) return obj; // model already wants specific bodies
+  const topK = Math.min(Number(obj.topK) || 5, 5);
+  return { ...obj, detail: 'full', topK };
+}
+
+// Best-effort extraction of file paths from a tool result's text so we can add
+// clickable references. Matches absolute paths (…/foo.ts optionally :line).
+function collectRefs(text: string, refs: Set<string>): void {
+  const re = /((?:\/|[A-Za-z]:\\)[^\s():"']+\.[A-Za-z0-9]{1,6})/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    refs.add(m[1]);
+    if (refs.size >= 20) break;
+  }
+}
+
+// The index-status tools (repo_overview, architecture_overview, show_execution_flow,
+// trace_calls/find_usages offline) say "not built" and point at SWE_BUILD_* when the
+// symbol table / call graph / usages index were never built for this workspace.
+function mentionsUnbuiltIndex(text: string): boolean {
+  return /\bnot built\b/i.test(text) || /SWE_BUILD_/.test(text);
+}
+
+// A single, actionable notice appended once when the code-intelligence indexes
+// are missing on this machine. Embedding-free fix — no re-index of vectors.
+export function emitUnbuiltIndexHint(stream: vscode.ChatResponseStream): void {
+  stream.markdown(
+    '\n\n> ⚠️ **Code-intelligence indexes are not built for this workspace**, so ' +
+      'architecture, call-graph, and usage lookups came back empty — the answer above ' +
+      'may be shallow, and a weaker model can make extra tool attempts hunting for them. ' +
+      'Building them is a one-time, **embedding-free** pass (your vectors are untouched):\n' +
+      '>\n' +
+      '> 1. Open this workspace in VS Code with the Foundry extension running (status bar shows `LSP Bridge: listening`).\n' +
+      '> 2. Add `"SWE_BUILD_ALL": "1"` to the `env` in `.vscode/mcp.json`, then restart the `local-semantic-search` MCP server.\n' +
+      '> 3. Wait for the four `done` logs in its output, then remove the flag.\n' +
+      '>\n' +
+      "> Or drop a teammate's prebuilt `.swe-search/index.db` into this workspace — the indexes travel with it.",
+  );
 }

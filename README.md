@@ -30,8 +30,8 @@ exactly as they would in any normal chat turn.
 | 🔗 **Usages & implementations** | "Where is X used?" and "what implements this interface?" — live via the language server, or offline from a persisted index. |
 | 🗺️ **Architecture overview** | Deterministic module-level map: modules, dependencies, entry points, and reference hotspots — no LLM, no re-index. |
 | 💬 **`@codebase` chat participant** | Ask the workspace anything inside Copilot Chat; it agentically drives the local tools and answers with grounded, clickable references. |
-| 📋 **`/plan` & `/arch` & `/graph`** | Grounded implementation plans (with change-impact blast radius), plus native Mermaid module & call-graph diagrams. |
-| 🛠️ **`/implement` execution** | Every `@codebase`/`/plan` answer ends with an **Implement here (Foundry)** button. `/implement` runs the approved plan as **one continuous LLM loop, entirely in the chat**: the LLM — constrained to the `foundry_*` tools + a small edit tool set (never built-in tools) — works through the plan, grounding each edit in the real code and applying it via a headless backend that validates + checkpoints every change. It pauses at the checkpoints it declares — review in VS Code's native diff, then **Continue** / **Auto-continue to end**; a blocked run pauses with **Retry / Skip**, and **Keep** / **Undo all** at the end. A **Continue in agent mode** button remains as a manual escape. |
+| 📋 **`/arch` & `/graph`** | Native Mermaid module dependency & call-graph diagrams, deterministic (no model call). |
+| 🛠️ **`@codebase` — one mode, model decides** | No separate `/plan`/`/implement` split — every message goes through one continuous agentic loop with the `foundry_*` lookup tools **and** the edit tools (`apply_edit`, `create_file`/`delete_file`, plus symbol-anchored `replace_symbol`/`insert_near_symbol`/`rename_symbol`/`add_import`/`remove_import`/`move_file` — resolved by NAME via the language server, not text matching) always available. The model itself decides, from what you asked, whether to just answer, propose a plan, or ground itself and make the change — no mid-run pausing once it starts editing. Review happens once, at the end: **🔍 Review all changes** opens every changed file in one multi-file diff, then **✓ Keep** / **↩ Undo all**. A **⚡ Continue in agent mode** button remains as a manual escape when a turn produced a plan with no changes. |
 | 🧩 **`#foundryCodebase` LM tools** | Drop-in replacement for a disabled `#codebase` inside Copilot's own chat and agent mode — including `foundry_plan`, so the agent can re-plan mid-implementation. |
 | ⚡ **Lazy indexing** | Search opens in seconds — recently-edited files embed first, partial results stream while the rest indexes. |
 | 🤝 **Shareable index** | Build once, share the portable `index.db`; teammates reuse it offline with zero re-embedding. |
@@ -242,18 +242,21 @@ Two surfaces, both reading the same local, query-only index:
 
 - **`@codebase` chat participant.** Ask it anything about the workspace
   (`@codebase how does hybrid retrieval work?`, `@codebase who calls upsertChunks
-  and is it safe to change?`). It runs an **agentic loop**: the model chooses which
-  local tools to call (semantic search, trace calls, find usages, architecture
-  overview…), and each call is shown as a progress line so the retrieval plan is
-  visible; the answer ends with a *"Grounded via …"* trailer and clickable file
-  references. Slash commands: **`/index`** (index overview); **`/arch`**
-  (architecture map **+ a Mermaid module dependency diagram**); **`/graph
-  <symbol>`** (a **Mermaid call graph** for a symbol — prefix `callers` to
-  invert); and **`/plan <change>`** — a grounded, step-by-step implementation plan
-  (it proposes, it doesn't edit) that also appends a **change-impact diagram**
-  (callers of the target symbol) when there's a blast radius to show. The diagrams
-  are plain Mermaid that VS Code chat renders natively — no bundled library — and
-  `/arch`, `/graph` are deterministic (no model request).
+  and is it safe to change?`, `fix the off-by-one in X`). It runs an **agentic
+  loop**: the model chooses which local tools to call (semantic search, trace
+  calls, find usages, architecture overview…) — and, when the request calls for
+  it, the edit tools too — with each call shown as a progress line so the
+  retrieval/edit plan is visible. There's no separate "plan" vs "implement"
+  command: the SAME loop decides, from what you asked, whether to just answer, to
+  propose a plan and stop, or to ground itself and make the change directly, then
+  runs to completion without pausing mid-way. The answer ends with a *"Grounded
+  via …"* trailer and clickable file references, plus (if anything changed) a
+  **Review all changes** / **Keep** / **Undo all** step. Slash commands:
+  **`/index`** (index overview); **`/arch`** (architecture map **+ a Mermaid
+  module dependency diagram**); **`/graph <symbol>`** (a **Mermaid call graph**
+  for a symbol — prefix `callers` to invert). The diagrams are plain Mermaid that
+  VS Code chat renders natively — no bundled library — and `/arch`, `/graph` are
+  deterministic (no model request).
 - **Language Model tools.** The same capabilities are registered as Copilot
   *Language Model tools*, so Copilot's own chat and agent mode can call them.
   Type **`#foundryCodebase`** in any chat to pull local-index context (the drop-in
