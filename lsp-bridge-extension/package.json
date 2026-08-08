@@ -444,6 +444,11 @@
           "id": "sweSearch",
           "title": "Semantic Search",
           "icon": "media/search.svg"
+        },
+        {
+          "id": "foundry",
+          "title": "Foundry",
+          "icon": "media/search.svg"
         }
       ]
     },
@@ -452,6 +457,13 @@
         {
           "id": "sweSearch.panel",
           "name": "Search",
+          "type": "webview"
+        }
+      ],
+      "foundry": [
+        {
+          "id": "foundry.agentPanel",
+          "name": "Agent",
           "type": "webview"
         }
       ]
@@ -475,6 +487,11 @@
       {
         "command": "foundry.implementPlan",
         "title": "Implement plan in agent mode",
+        "category": "Foundry"
+      },
+      {
+        "command": "foundry.focusPanel",
+        "title": "Open agent panel",
         "category": "Foundry"
       }
     ],

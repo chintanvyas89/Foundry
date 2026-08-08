@@ -9,6 +9,7 @@ import { resolveWorkspaceSymbol } from './workspaceSymbol';
 import { SearchClient } from './searchClient';
 import { registerSearchCommands } from './searchCommands';
 import { SearchPanelProvider } from './searchPanel';
+import { FoundryPanelProvider } from './panel/foundryPanel';
 import { registerLanguageModelTools } from './languageModelTools';
 import { registerChatParticipant } from './chatParticipant';
 import { registerAgentCommands } from './implement';
@@ -36,6 +37,22 @@ export function activate(context: vscode.ExtensionContext) {
   // @codebase chat participant. Both no-op gracefully on older VS Code.
   registerLanguageModelTools(context, searchClient, searchOutput);
   registerChatParticipant(context, searchClient, searchOutput);
+
+  // Foundry agent panel — the custom surface that owns a whole agent session
+  // (see panel/foundryPanel.ts). Runs alongside the @codebase chat participant
+  // rather than replacing it; both drive the same runAgent() loop.
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      FoundryPanelProvider.viewType,
+      new FoundryPanelProvider(context.extensionUri),
+      // Session state lives in the host, so losing the DOM is survivable — but
+      // retaining it keeps scroll position and open tool groups across hides.
+      { webviewOptions: { retainContextWhenHidden: true } },
+    ),
+    vscode.commands.registerCommand('foundry.focusPanel', () =>
+      vscode.commands.executeCommand('foundry.agentPanel.focus'),
+    ),
+  );
 
   // Relevance-feedback drilldown panel (sidebar).
   context.subscriptions.push(
