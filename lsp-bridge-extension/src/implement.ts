@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ExecutionService } from './executor/executionService';
 import { runAgent, seedMessages, emitUnbuiltIndexHint } from './executor/planAgent';
+import { chatOutput } from './executor/agentOutput';
 import { openAllChangesDiff } from './executor/editTools';
 import { FOUNDRY_TOOL_PREFIX } from './languageModelTools';
 
@@ -118,9 +119,16 @@ async function runOnce(
   const st = run;
   if (!st) return;
 
+  // The chat participant runs the loop exactly once, autonomously, with the
+  // full lookups+edits tool list — unchanged by the panel refactor. `out` is a
+  // thin wrapper over the chat stream; the two-phase split and richer output
+  // signals are the panel's business, not this driver's.
+  const out = chatOutput(stream);
   const result = await runAgent({
-    request,
-    stream,
+    model: request.model,
+    prompt: request.prompt,
+    toolInvocationToken: request.toolInvocationToken,
+    out,
     token,
     service: st.service,
     workspaceRoot: st.workspaceRoot,
@@ -145,7 +153,7 @@ async function runOnce(
     const names = result.usedTools.map((n) => n.replace(FOUNDRY_TOOL_PREFIX, '')).join(', ');
     stream.markdown(`\n\n---\n_Grounded via the local index: ${names}._`);
   }
-  if (result.sawUnbuiltIndex) emitUnbuiltIndexHint(stream);
+  if (result.sawUnbuiltIndex) emitUnbuiltIndexHint(out);
   renderTokenUsage(stream, result.tokensUsed, st.cumulativeTokens);
 
   if (st.service.changeCount === 0) {

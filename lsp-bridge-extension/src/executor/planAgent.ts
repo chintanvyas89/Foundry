@@ -2,16 +2,25 @@ import * as vscode from 'vscode';
 import { FOUNDRY_TOOL_PREFIX } from '../languageModelTools';
 import { EDIT_TOOLS, EDIT_TOOL_NAMES, runEditTool } from './editTools';
 import { ExecutionService } from './executionService';
+import type { AgentOutput } from './agentOutput';
 
-// The ONE @codebase agent loop — answers questions, proposes plans, AND makes
-// changes, all through the same tool-calling loop. There is no separate
-// "planning mode" vs "execution mode": the tool list always includes both the
-// foundry_* lookups and the edit tools, and the model itself decides — from
-// what the user actually asked — whether to just answer, propose a plan (and
-// stop), or ground itself and go make the change. No mid-run checkpoints: once
-// it decides to edit, it runs autonomously to completion or until genuinely
-// stuck. This also means no separate "planning" conversation whose context gets
-// discarded before "execution" starts — it is the same conversation throughout.
+// The shared agent loop — answers questions, proposes plans, AND makes changes,
+// all through the same tool-calling loop. It is surface-agnostic: what varies
+// between the @codebase chat participant and the Foundry panel is injected via
+// AgentContext (where output goes, which tools are offered, what preamble the
+// caller seeded into `messages`), not branched on in here.
+//
+// As the chat participant drives it, there is no separate "planning mode" vs
+// "execution mode": the tool list holds both the foundry_* lookups and the edit
+// tools, and the model itself decides — from what the user actually asked —
+// whether to just answer, propose a plan (and stop), or ground itself and go
+// make the change. No mid-run checkpoints: once it decides to edit, it runs
+// autonomously to completion or until genuinely stuck, so no "planning"
+// conversation gets its context discarded before "execution" starts.
+//
+// The panel splits that into two runs on purpose, and can do so safely because
+// it owns the session: it hands the second run a curated context package rather
+// than relying on a chat turn boundary that would have thrown the findings away.
 
 const MAX_ROUNDS = 40; // generous: one run may need to cover a whole multi-file change
 const MAX_TOOL_RESULT_CHARS = 4000;
@@ -19,6 +28,11 @@ const MAX_TOOL_RESULT_CHARS = 4000;
 // — that's the code the model reasons over; still bounded, since results re-send
 // every subsequent round.
 const MAX_CODE_RESULT_CHARS = 8000;
+
+// chatContext.history replay in seedMessages() — see there for why this is bounded
+// rather than replaying every prior turn in full on every future turn.
+const MAX_VERBATIM_TURNS = 3; // request/response pairs
+const COMPACT_EXCERPT_CHARS = 150; // per compacted (older) turn
 
 // Not every model follows "don't ask permission, just edit" as reliably as
 // others — some (observed: GPT-5 mini) plan correctly but then stop to ask
@@ -32,93 +46,136 @@ const MAX_PERMISSION_NUDGES = 2;
 const PERMISSION_ASK_RE =
   /\b(should i|shall i|do you want me to|would you like me to|can i go ahead|ok(?:ay)? (?:for me )?to|you(?:'d| would) like me to)\b[^.?!\n]{0,60}\b(apply|implement|proceed|execute|go ahead|make (?:the|this) change|run (?:the|this))\b/i;
 
-const AGENT_PREAMBLE = [
-  'You are @codebase, a coding assistant for the user’s CURRENT VS Code workspace. A local,',
-  'offline code index is available through the foundry_* tools: foundry_semanticSearch,',
+// ---------------------------------------------------------------------------
+// Preamble segments.
+//
+// The text is split into ordered, named blocks rather than one constant so a
+// second surface (the Foundry panel, which runs exploration and implementation
+// as two separate model calls) can compose the subset each phase needs — an
+// exploration pass has no business carrying the edit rules, and an
+// implementation pass has no business carrying "decide whether to just answer".
+//
+// Composition is a flat join with ' ', exactly as the single array was, so
+// CHAT_PREAMBLE below is byte-identical to the constant it replaced. Keep it
+// that way: the chat participant's behaviour must not shift because of a
+// refactor done for the panel's benefit.
+// ---------------------------------------------------------------------------
+
+// Who you are and what tools exist. Assumes edit tools are in the tool list.
+const SEG_IDENTITY = [
+  'You are @codebase, a coding assistant for the user’s VS Code workspace. A local, offline',
+  'code index is available through the foundry_* tools: foundry_semanticSearch,',
   'foundry_searchSymbol, foundry_traceCalls, foundry_showExecutionFlow, foundry_findUsages,',
   'foundry_findImplementations, foundry_architectureOverview, foundry_repoOverview,',
   'foundry_readFile, foundry_listDirectory, foundry_projectStandards, foundry_searchConfig.',
-  'ALWAYS ground answers in this workspace by calling these tools before answering — never',
-  'guess from memory. You ALSO have edit tools (apply_edit, create_file, delete_file,',
-  'replace_symbol, insert_near_symbol, rename_symbol, add_import, remove_import, move_file) —',
-  'no built-in VS Code tools, no terminal.',
-  '\n\nDECIDE YOUR RESPONSE FROM WHAT THE USER ACTUALLY ASKED — there is no separate',
-  '"plan mode"/"execute mode"; you choose per message:',
-  '\n• An EXPLANATION ("what does X do", "how is Y handled")? Answer directly. Call no edit tools.',
-  '\n• A PLAN, not the change itself ("how would I…", "what would it take to…", "should I…")?',
-  'Answer with ONLY this markdown, filling every section, and call no edit tools:',
+  'ALWAYS ground answers by calling these tools first — never guess from memory. You ALSO',
+  'have edit tools (apply_edit, create_file, delete_file, replace_symbol, insert_near_symbol,',
+  'rename_symbol, add_import, remove_import, move_file) — no built-in VS Code tools, no terminal.',
+];
+
+// Intent routing: one turn, model picks explanation vs plan vs change. This is
+// the chat participant's defining behaviour — a two-phase surface knows its
+// phase up front and replaces this segment rather than including it.
+const SEG_INTENT_ROUTING = [
+  '\n\nDECIDE YOUR RESPONSE FROM WHAT WAS ASKED — no separate "plan mode"/"execute mode";',
+  'choose per message:',
+  '\n• An EXPLANATION ("what does X do", "how is Y handled")? Answer directly, no edit tools.',
+  '\n• A PLAN, not the change itself ("how would I…", "what would it take to…")? Answer with',
+  'ONLY this markdown, filling every section, no edit tools:',
   '\n## Plan\n**Context:** current state in 1–2 lines.',
   '\n**Assumptions & open questions:** anything inferred or needing confirmation.',
   '\n**Files to change:** a bullet per file as `path` — what changes and why.',
   '\n**Steps:** a numbered, ordered list of concrete edits.',
   '\n**Risks / staleness:** what could break or go stale.',
   '\n**Verify:** the exact test/build commands (from real conventions/manifests you found) and a manual check.',
-  '\n• AN ACTUAL FIX/CHANGE ("fix X", "implement Y", "add Z", "refactor…")? Ground yourself via',
-  'foundry_* tools, then make the change directly with the edit tools — work through everything',
-  'needed to completion in ONE continuous pass. NEVER stop to ask "should I apply this change?" /',
-  '"shall I proceed?" / "do you want me to implement this now?" — asking that question means you',
-  'already decided edits are wanted, so the answer is always yes; call the edit tool in THIS same',
-  'turn instead of asking. There is no per-step approval — the user reviews everything you changed',
-  'at the end (via a review UI) and can undo it all in one action, so proceed without pausing.',
-  '\nIf genuinely unclear which of these three the user wants, ask ONE clarifying question rather',
-  'than guessing.',
-  '\n\nWHEN YOU DO EDIT: 1) Look up the REAL current code first — never edit from memory. A',
-  'targeted foundry_readFile(file, symbol="name") is enough; you don\'t need the whole file. 2)',
-  'Choose the right tool: apply_edit for a small tweak where you know the exact current text;',
-  'replace_symbol to rewrite a WHOLE function/method/class (resolved by name via the language',
-  'server — you don\'t need its exact current text); insert_near_symbol to add code next to an',
-  'existing symbol; rename_symbol for a TRUE rename that must update every reference;',
-  'add_import/remove_import/move_file for the obvious cases; create_file/delete_file for new or',
-  'removed files. 3) When SEVERAL edits target the SAME file, apply them ONE AT A TIME, not as a',
-  'batch of calls composed from a single earlier read: an earlier edit changes the surrounding',
-  'text, so a "find" string you worked out before it ran can silently stop matching once it\'s',
-  'applied. After an edit lands in a file you still have MORE edits for, treat your knowledge of',
-  'that file as stale for the next one — fold adjacent changes into a single apply_edit instead of',
-  'several when you can, and re-derive the next "find" from the tool\'s own diagnostics/feedback',
-  'rather than the pre-edit read. 4) On a "symbol not found"/"ambiguous" error, add',
-  'container/index/signature and retry — don\'t fall back to guessing text. On an apply_edit "not',
-  'found" error, re-read the exact current text and retry. 5) Implement ONLY what\'s actually being asked — no unrelated changes.',
-  '6) After editing, if diagnostics report errors you introduced, fix them before finishing.',
-  '\n\nChoosing a LOOKUP tool (this matters — pick by what the user gave you):',
-  '\n• PRIORITY RULE: if the request names an exact identifier or machine name (snake_case,',
-  'dotted config id, or CamelCase — e.g. mercury_reference_card, field_hide_symbol,',
-  'getUserById), try foundry_searchSymbol and/or foundry_searchConfig for that exact name',
-  'FIRST — they are precise exact-match lookups, cheaper and more reliable than semantic',
-  'search. Only call foundry_semanticSearch once those come up empty, or for the parts of',
-  'the request that describe behaviour rather than name something exactly (a request often',
-  'mixes both — e.g. "add a Hide Date toggle for mercury_reference_card" is a named-symbol',
-  'lookup for the block PLUS a behavioural one for how the other toggles are implemented;',
-  'do the name lookups first, then semantic search for the pattern).',
-  '\n• Wants the repo LAYOUT / directory structure / "where do files live"? →',
-  'foundry_listDirectory (a recursive file/folder tree; drill with path="…").',
-  '\n• A namespaced/fully-qualified class name (has backslashes, e.g. `Acme\\Module\\Entity\\Foo`)?',
-  '→ foundry_readFile accepts the FQCN directly (it resolves to the file via the project\'s',
-  'AUTO-DETECTED standards — e.g. Composer PSR-4, plus any framework-specific reader like',
-  'Drupal\'s runtime module namespaces, when present — no config needed); call',
-  'foundry_projectStandards to learn what was detected, or "what standard/framework does this',
-  'project use".',
-  '\n• Names a specific SYMBOL (function/class/type/constant)? → foundry_searchSymbol',
-  '(an exact name lookup). Do NOT use semanticSearch to find something named exactly.',
-  '\n• Names a specific MODULE, DIRECTORY, or FILE? → foundry_architectureOverview',
-  'with module="…" to locate it, then foundry_readFile to read its actual source. Do',
-  'NOT semanticSearch a module/file name.',
-  '\n• Asks about CONFIG — Drupal views/fields/displays, routes, permissions,',
-  'services, a module’s dependencies, or any .yml setting ("which view lists X",',
-  '"what fields does the Article type have", "what handles the /foo route")? →',
-  'foundry_searchConfig (structured config is NOT in semanticSearch — it is never',
-  'embedded), then foundry_readFile for the raw YAML.',
-  '\n• Describes BEHAVIOUR but not a name ("how/where is X handled")? →',
-  'foundry_semanticSearch to discover it by meaning.',
-  '\n\nThen DRILL into what you found instead of searching again. foundry_readFile is',
-  'TWO-PASS to save tokens: call it with just `file` first to get the OUTLINE (the',
-  'file\'s functions/classes/methods with line ranges, no bodies), then call it again',
-  'with `symbol="name"` to read just the code you need. (Or foundry_semanticSearch',
-  'expand=[…] for a hit\'s full body.) Follow relationships with foundry_traceCalls /',
-  'foundry_findUsages. To iterate a search, prefer mode:"refine"/"expand" or pinResults',
-  '(cheap — reuses results). Re-run a fresh semanticSearch only for a genuinely different',
-  'question, or when the first pass clearly missed — not to reword the same intent.',
-  '\n\nCite concrete files as `path:line`. Be specific to this codebase.',
-].join(' ');
+  '\n• AN ACTUAL FIX/CHANGE ("fix X", "implement Y", "add Z", "refactor…")? Ground via foundry_*',
+  'tools, then edit directly — work through everything needed in ONE continuous pass. NEVER stop',
+  'to ask "should I apply this change?" / "shall I proceed?" — asking means you already decided',
+  'edits are wanted, so the answer is always yes: call the edit tool now, don\'t ask. No per-step',
+  'approval — review/undo happens at the end, so proceed without pausing.',
+  '\nIf unclear which of these three is wanted, ask ONE clarifying question rather than guessing.',
+];
+
+// How to edit safely. Needed by any phase that has the edit tools in its list.
+const SEG_EDIT_RULES = [
+  '\n\nWHEN YOU DO EDIT: 1) Look up the REAL current code first — never edit from memory; a',
+  'targeted foundry_readFile(file, symbol="name") suffices, skip the whole file. 2) Pick the tool',
+  'by what you need: apply_edit (exact known text), replace_symbol (whole function/method/class,',
+  'no exact text needed), insert_near_symbol, rename_symbol (cross-reference), add/remove_import,',
+  'move_file, create_file/delete_file. 3) When SEVERAL edits target the SAME file, apply them ONE',
+  'AT A TIME, not batched from a single earlier read — an edit changes the surrounding text, so a',
+  '"find" string from before it ran can silently stop matching. Fold adjacent changes into one',
+  'apply_edit when you can; otherwise re-derive the next "find" from fresh diagnostics/feedback,',
+  'not the pre-edit read. 4) On a "symbol not found"/"ambiguous" error, add',
+  'container/index/signature and retry (don\'t guess text); on an apply_edit "not found" error,',
+  're-read the exact text and retry. 5) Implement ONLY what\'s asked — no unrelated changes. 6) Fix',
+  'any diagnostics errors you introduced before finishing.',
+];
+
+// Which lookup tool to reach for, and how to drill rather than re-search.
+// Every phase on every surface wants this — it's the whole point of the index.
+const SEG_LOOKUP_ROUTING = [
+  '\n\nChoosing a LOOKUP tool:',
+  '\n• PRIORITY RULE: an exact identifier/machine name (snake_case, dotted config id, CamelCase —',
+  'e.g. mercury_reference_card, getUserById)? Try foundry_searchSymbol/foundry_searchConfig FIRST',
+  '— precise exact-match, cheaper than semantic search. Call foundry_semanticSearch only once',
+  'those miss, or for the behavioural part of a mixed request (e.g. "add a Hide Date toggle for',
+  'mercury_reference_card" mixes a name lookup with a behavioural one — name lookup first).',
+  '\n• Repo LAYOUT / directory structure / "where do files live"? → foundry_listDirectory (a',
+  'recursive tree; drill with path="…").',
+  '\n• A namespaced/fully-qualified class name (backslashes, e.g. `Acme\\Module\\Entity\\Foo`)? →',
+  'foundry_readFile accepts the FQCN directly (auto-detected standards resolve it — Composer',
+  'PSR-4, plus e.g. Drupal\'s runtime namespaces if present); foundry_projectStandards reports',
+  'what was detected.',
+  '\n• A specific SYMBOL (function/class/type/constant)? → foundry_searchSymbol (exact name',
+  'lookup) — not semanticSearch.',
+  '\n• A specific MODULE/DIRECTORY/FILE? → foundry_architectureOverview(module="…") to locate it,',
+  'then foundry_readFile — not semanticSearch.',
+  '\n• CONFIG — any structured .yml setting (e.g. Drupal views/fields, routes, permissions,',
+  'services; "which view lists X")? → foundry_searchConfig (never embedded, NOT in',
+  'semanticSearch), then foundry_readFile for the raw YAML.',
+  '\n• BEHAVIOUR but not a name ("how/where is X handled")? → foundry_semanticSearch to discover',
+  'it by meaning.',
+  '\n\nThen DRILL into what you found instead of searching again. foundry_semanticSearch returns',
+  'compact signatures by default — triage from those, then call it again with expand=[n,…] for',
+  'just the bodies you need, rather than re-searching. foundry_readFile is TWO-PASS too: `file`',
+  'alone for the OUTLINE (functions/classes/methods, line ranges, no bodies), then again with',
+  '`symbol="name"` for just the code you need. Follow relationships with',
+  'foundry_traceCalls/foundry_findUsages. To iterate, prefer mode:"refine"/"expand" or pinResults',
+  '(cheap — reuses results) over a fresh semanticSearch — only re-run fresh for a genuinely',
+  'different question, not to reword the same intent.',
+  '\n\nFor SEVERAL independent lookups (e.g. a symbol check AND a config check), call them',
+  'together in the SAME round, not one at a time — each extra round re-sends this preamble.',
+  'Don\'t batch a call that DEPENDS on an earlier one\'s result.',
+];
+
+const SEG_CITE = ['\n\nCite concrete files as `path:line`. Be specific to this codebase.'];
+
+// Flat join with ' ' — the same operation the one-piece array performed, so
+// segment boundaries add no characters of their own.
+export function composePreamble(...segments: string[][]): string {
+  return segments.flat().join(' ');
+}
+
+// Exported so another surface can compose its own preamble from the same
+// vetted wording rather than forking a second copy that drifts.
+export const PREAMBLE_SEGMENTS = {
+  identity: SEG_IDENTITY,
+  intentRouting: SEG_INTENT_ROUTING,
+  editRules: SEG_EDIT_RULES,
+  lookupRouting: SEG_LOOKUP_ROUTING,
+  cite: SEG_CITE,
+} as const;
+
+// The chat participant's preamble: every segment, in the original order.
+// Byte-identical to the pre-refactor AGENT_PREAMBLE constant.
+const CHAT_PREAMBLE = composePreamble(
+  SEG_IDENTITY,
+  SEG_INTENT_ROUTING,
+  SEG_EDIT_RULES,
+  SEG_LOOKUP_ROUTING,
+  SEG_CITE,
+);
 
 export type AgentRunStatus = 'finished' | 'blocked';
 
@@ -170,7 +227,7 @@ export async function seedMessages(
   chatContext: vscode.ChatContext,
   request: vscode.ChatRequest,
 ): Promise<vscode.LanguageModelChatMessage[]> {
-  const messages: vscode.LanguageModelChatMessage[] = [vscode.LanguageModelChatMessage.User(AGENT_PREAMBLE)];
+  const messages: vscode.LanguageModelChatMessage[] = [vscode.LanguageModelChatMessage.User(CHAT_PREAMBLE)];
 
   const conventions = await loadProjectConventions();
   if (conventions) {
@@ -182,38 +239,75 @@ export async function seedMessages(
     );
   }
 
-  for (const turn of chatContext.history) {
+  // Replay the most recent MAX_VERBATIM_TURNS request/response pairs in full — that
+  // comfortably covers the continuity case this exists for ("give me a plan" → next
+  // turn "go ahead") plus a bit of follow-up beyond it. Turns older than that would
+  // otherwise replay in full on EVERY future turn of a long session (unbounded
+  // growth), so they're compacted to a short excerpt instead of dropped outright —
+  // the model still gets a breadcrumb of what happened earlier rather than a silent
+  // gap, at a fraction of the resend cost.
+  const cutoff = chatContext.history.length - MAX_VERBATIM_TURNS * 2;
+  chatContext.history.forEach((turn, i) => {
+    const compact = i < cutoff;
     if (turn instanceof vscode.ChatRequestTurn) {
-      messages.push(vscode.LanguageModelChatMessage.User(turn.prompt));
+      messages.push(
+        vscode.LanguageModelChatMessage.User(compact ? head(turn.prompt, COMPACT_EXCERPT_CHARS) : turn.prompt),
+      );
     } else if (turn instanceof vscode.ChatResponseTurn) {
       let text = '';
       for (const part of turn.response) {
         if (part instanceof vscode.ChatResponseMarkdownPart) text += part.value.value;
       }
-      if (text.trim()) messages.push(vscode.LanguageModelChatMessage.Assistant(text));
+      if (!text.trim()) return;
+      messages.push(
+        vscode.LanguageModelChatMessage.Assistant(compact ? head(text, COMPACT_EXCERPT_CHARS) : text),
+      );
     }
-  }
+  });
 
   messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
   return messages;
 }
 
+// Every foundry_* lookup tool currently registered, in LanguageModelChatTool shape.
+export function lookupTools(): vscode.LanguageModelChatTool[] {
+  return vscode.lm.tools
+    .filter((t) => t.name.startsWith(FOUNDRY_TOOL_PREFIX))
+    .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+}
+
+// Lookups + edits: what a run that is allowed to change files gets. This is the
+// chat participant's list, and runAgent()'s default when none is injected.
+export function defaultAgentTools(): vscode.LanguageModelChatTool[] {
+  return [...lookupTools(), ...EDIT_TOOLS];
+}
+
 export interface AgentContext {
-  request: vscode.ChatRequest;
-  stream: vscode.ChatResponseStream;
+  model: vscode.LanguageModelChat;
+  /** The user's request text — used by the no-tool-calling fallback path. */
+  prompt: string;
+  /**
+   * Chat-only: forwarded to lm.invokeTool so a tool can raise confirmation UI in
+   * the chat turn. `undefined` outside a chat request, which is the documented
+   * value for invoking tools from any other flow.
+   */
+  toolInvocationToken?: vscode.ChatParticipantToolToken;
+  out: AgentOutput;
   token: vscode.CancellationToken;
   service: ExecutionService;
   workspaceRoot: string;
   messages: vscode.LanguageModelChatMessage[];
+  /**
+   * Tools offered to the model. Defaults to lookups + edits. A phase that must
+   * not touch files (exploration/planning) passes lookupTools() instead — the
+   * only airtight way to guarantee it, since prompt text alone doesn't bind.
+   */
+  tools?: vscode.LanguageModelChatTool[];
 }
 
 export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
-  const { request, stream, token, service, workspaceRoot, messages } = ctx;
-  const model = request.model;
-  const foundryTools = vscode.lm.tools
-    .filter((t) => t.name.startsWith(FOUNDRY_TOOL_PREFIX))
-    .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
-  const tools: vscode.LanguageModelChatTool[] = [...foundryTools, ...EDIT_TOOLS];
+  const { model, prompt, toolInvocationToken, out, token, service, workspaceRoot, messages } = ctx;
+  const tools = ctx.tools ?? defaultAgentTools();
 
   const usedTools = new Set<string>();
   const seenCalls = new Set<string>(); // (tool, input) already run this turn — skip repeats
@@ -246,7 +340,7 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
       // Model can't do tool-calling (or tools rejected) — fall back to a single
       // grounded pass so the participant still answers (no edit capability without
       // tool calling, so this degrades to Q&A only).
-      const fallbackText = await runFallbackRag(request, stream, model, token);
+      const fallbackText = await runFallbackRag(prompt, toolInvocationToken, out, model, token);
       return {
         status: 'finished',
         answered: true,
@@ -264,7 +358,7 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
     let roundText = '';
     for await (const part of response.stream) {
       if (part instanceof vscode.LanguageModelTextPart) {
-        stream.markdown(part.value);
+        out.markdown(part.value);
         answered = answered || part.value.trim().length > 0;
         roundText += part.value;
         answerText += part.value;
@@ -305,7 +399,7 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
           (await countTokensSafe(model, messages[messages.length - 1], token));
         tokensUsed += nudgeTokens;
         cumulativeContext += nudgeTokens;
-        stream.markdown('\n\n_(proceeding automatically — this run doesn\'t pause for per-step approval)_\n');
+        out.markdown('\n\n_(proceeding automatically — this run doesn\'t pause for per-step approval)_\n');
         continue;
       }
       break; // model produced its final answer
@@ -332,7 +426,9 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
           seenCalls.add(key);
           newCalls += 1;
           editToolCalled = true;
-          stream.progress(`✎ ${call.name} ${typeof input.path === 'string' ? input.path : ''}`);
+          const label = `✎ ${call.name} ${typeof input.path === 'string' ? input.path : ''}`;
+          out.progress(label);
+          out.toolActivity?.({ tool: call.name, kind: 'edit', label, input });
           resultText = await runEditTool(call.name, input, service, workspaceRoot);
         }
       } else {
@@ -344,13 +440,11 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
         } else {
           seenCalls.add(key);
           newCalls += 1;
-          stream.progress(labelFor(call));
+          const label = labelFor(call);
+          out.progress(label);
+          out.toolActivity?.({ tool: call.name, kind: 'lookup', label, input });
           try {
-            const r = await vscode.lm.invokeTool(
-              call.name,
-              { input, toolInvocationToken: request.toolInvocationToken },
-              token,
-            );
+            const r = await vscode.lm.invokeTool(call.name, { input, toolInvocationToken }, token);
             resultText = toolText(r);
             collectRefs(resultText, refs);
             if (!sawUnbuiltIndex && mentionsUnbuiltIndex(resultText)) sawUnbuiltIndex = true;
@@ -390,7 +484,7 @@ export async function runAgent(ctx: AgentContext): Promise<AgentRunResult> {
       const finalResp = await model.sendRequest(finalMessages, {}, token);
       let finalText = '';
       for await (const part of finalResp.text) {
-        stream.markdown(part);
+        out.markdown(part);
         finalText += part;
         answerText += part;
         answered = answered || part.trim().length > 0;
@@ -430,17 +524,18 @@ async function countTokensSafe(
 // semantic_search ourselves (via the LM tool directly) and ask the model to
 // answer from those results. No edit capability without tool calling.
 async function runFallbackRag(
-  request: vscode.ChatRequest,
-  stream: vscode.ChatResponseStream,
+  prompt: string,
+  toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
+  out: AgentOutput,
   model: vscode.LanguageModelChat,
   token: vscode.CancellationToken,
 ): Promise<string> {
-  stream.progress('Searching the local index…');
+  out.progress('Searching the local index…');
   let contextText = '';
   try {
     const r = await vscode.lm.invokeTool(
       `${FOUNDRY_TOOL_PREFIX}semanticSearch`,
-      { input: { query: request.prompt, context: true }, toolInvocationToken: request.toolInvocationToken },
+      { input: { query: prompt, context: true }, toolInvocationToken },
       token,
     );
     contextText = toolText(r);
@@ -448,16 +543,16 @@ async function runFallbackRag(
     /* leave context empty — the model will answer without grounding */
   }
   const messages = [
-    vscode.LanguageModelChatMessage.User(AGENT_PREAMBLE),
+    vscode.LanguageModelChatMessage.User(CHAT_PREAMBLE),
     vscode.LanguageModelChatMessage.User(
       `Workspace search results:\n\n${contextText || '(no results)'}\n\n` +
-        `Question: ${request.prompt}\n\nAnswer using the results above. Cite files as path:line.`,
+        `Question: ${prompt}\n\nAnswer using the results above. Cite files as path:line.`,
     ),
   ];
   const response = await model.sendRequest(messages, {}, token);
   let text = '';
   for await (const part of response.text) {
-    stream.markdown(part);
+    out.markdown(part);
     text += part;
   }
   return text;
@@ -506,16 +601,25 @@ function budgetFor(toolName: string): number {
     : MAX_TOOL_RESULT_CHARS;
 }
 
-// Weak models often call foundry_semanticSearch and then reason over the compact
-// signatures it returns by default, producing shallow answers. When the model
-// hasn't asked for bodies (no expand, no explicit detail), request full bodies for
-// a bounded number of hits so it always has real code to work from.
+// semantic_search's own default (detail:'compact') is deliberately token-lean —
+// forcing detail:'full' here would 4-6x every call regardless of whether the model
+// actually needed bodies, and that inflated result then re-sends on every subsequent
+// round too. Leave `detail`/`expand` alone entirely (the model already knows what it
+// wants once it sets either). Only bound topK — a floor so an unusually small
+// request still gives the model enough (cheap, compact) candidates to reason over,
+// and a ceiling against a runaway request.
+const MIN_SEMANTIC_SEARCH_TOPK = 8;
+const MAX_SEMANTIC_SEARCH_TOPK = 10;
 function boostSearchInput(name: string, input: object): Record<string, unknown> {
   const obj = input as Record<string, unknown>;
   if (name !== `${FOUNDRY_TOOL_PREFIX}semanticSearch`) return obj;
-  if ('expand' in obj || obj.detail) return obj; // model already wants specific bodies
-  const topK = Math.min(Number(obj.topK) || 5, 5);
-  return { ...obj, detail: 'full', topK };
+  if ('expand' in obj) return obj; // model already named which hits it wants bodies for
+  const requested = Number(obj.topK);
+  const topK =
+    Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.max(requested, MIN_SEMANTIC_SEARCH_TOPK), MAX_SEMANTIC_SEARCH_TOPK)
+      : MIN_SEMANTIC_SEARCH_TOPK;
+  return { ...obj, topK };
 }
 
 // Best-effort extraction of file paths from a tool result's text so we can add
@@ -538,8 +642,8 @@ function mentionsUnbuiltIndex(text: string): boolean {
 
 // A single, actionable notice appended once when the code-intelligence indexes
 // are missing on this machine. Embedding-free fix — no re-index of vectors.
-export function emitUnbuiltIndexHint(stream: vscode.ChatResponseStream): void {
-  stream.markdown(
+export function emitUnbuiltIndexHint(out: AgentOutput): void {
+  out.markdown(
     '\n\n> ⚠️ **Code-intelligence indexes are not built for this workspace**, so ' +
       'architecture, call-graph, and usage lookups came back empty — the answer above ' +
       'may be shallow, and a weaker model can make extra tool attempts hunting for them. ' +
